@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.13.16-slim
 WORKDIR /app
 COPY requirements.txt .
 # retry: flaky networks drop DNS mid-install; the cache keeps finished downloads
