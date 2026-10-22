@@ -8,6 +8,7 @@ import os
 import uvicorn
 
 if __name__ == "__main__":
+    os.umask(0o077)  # the database, its WAL and any file the app writes are owner-only
     uvicorn.run(
         "app.main:create_app", factory=True, host=os.getenv("HOST", "127.0.0.1"), port=int(os.getenv("PORT", "8330")),
         proxy_headers=False, server_header=False, access_log=False, timeout_keep_alive=5, limit_concurrency=200,

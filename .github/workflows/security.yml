@@ -98,8 +98,9 @@ jobs:
             u=$(docker inspect -f '{{.Config.User}}' $(docker compose ps -q $c))
             [ -n "$u" ] && [ "$u" != root ] && [ "$u" != 0 ] || fail "$c runs as root"
           done
-          docker compose port backend 8000 2>/dev/null | grep -q . && fail "backend is published to the host"
-          docker compose port frontend 3000 2>/dev/null | grep -q . && fail "frontend is published to the host"
+          for c in backend frontend; do  # `docker compose port` prints ":0" for an unpublished port, so inspect the real host bindings
+            [ -z "$(docker inspect -f '{{range $p, $b := .NetworkSettings.Ports}}{{if $b}}{{$p}} {{end}}{{end}}' $(docker compose ps -q $c))" ] || fail "$c is published to the host"
+          done
           docker compose exec -T frontend node -e "fetch('http://backend:8000/api/health',{signal:AbortSignal.timeout(3000)}).then(()=>process.exit(1)).catch(()=>process.exit(0))" || fail "frontend can reach the backend"
           echo "hardening assertions passed"
       - id: caddy

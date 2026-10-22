@@ -53,7 +53,9 @@ def send_sms(st: Settings, phone: str, code: str):
         body = json.dumps({"phone": phone, "code": code, "text": f"کد تایید فیت‌پیمان: {code}"}).encode()
         req = urllib.request.Request(st.sms_webhook_url, body, {"content-type": "application/json"}, method="POST")
         try:
-            with urllib.request.urlopen(req, timeout=5):  # nosec B310 nosemgrep: dynamic-urllib-use-detected - http(s) scheme enforced in Settings.from_env
+            # The http(s) scheme is enforced in Settings.from_env, so this can never be file:// or ftp://.
+            # nosemgrep: dynamic-urllib-use-detected
+            with urllib.request.urlopen(req, timeout=5):  # nosec B310
                 _sms["fails"] = 0
                 return
         except urllib.error.HTTPError as e:

@@ -319,13 +319,17 @@ def test_supported_entrypoint_never_lets_uvicorn_rewrite_the_client_ip():
 
 
 def test_a_user_who_cannot_cover_next_week_is_paused_and_told(demo):
-    login(demo, "09120000003")  # seeded user with pacts
+    new_user(demo, "09129991111")  # a fresh user can only LOSE in the early close, so the outcome does not depend on the weekday
+    assert demo.post("/api/pacts", json={"type": "gym", "target_days": 1, "stake": 10_000}).status_code == 200
     with sqlite3.connect(demo.st.db_path) as con:
-        con.execute("UPDATE users SET balance=1 WHERE phone='09120000003'")  # cannot cover any exposure
-    demo.post("/api/settle", json={})
+        con.execute("UPDATE users SET balance=5000 WHERE phone='09129991111'")  # less than one week of exposure (10,000)
+        con.execute("DELETE FROM txns WHERE user_id=(SELECT id FROM users WHERE phone='09129991111')")
+        con.execute("INSERT INTO txns(user_id,amount,kind,day) SELECT id,5000,'topup','2026-01-01' FROM users WHERE phone='09129991111'")
+    assert demo.post("/api/settle", json={}).status_code == 200
     d = demo.get("/api/dashboard").json()
     assert d["pacts"] == [] and d["paused"] is True
     assert demo.get("/api/wallet").json()["txns"][0]["kind"] == "paused"
+    assert_ledger(demo.st.db_path)
 
 
 def test_account_deletion_with_a_balance_is_refused_outside_demo(prod, monkeypatch):
@@ -672,3 +676,16 @@ def test_a_no_money_pact_is_possible_with_an_empty_wallet_and_settles_without_di
     assert demo.post(f"/api/pacts/{pid}/checkin", json={"value": 45}).json()["done_days"] == 1  # a winner whose weight is 0
     assert demo.post("/api/settle", json={}).status_code == 200  # total_w == 0 must not raise ZeroDivisionError
     assert_ledger(demo.st.db_path)
+
+
+def test_money_writes_fail_closed_while_the_settlement_hold_is_on(demo):
+    new_user(demo, "09129992222")
+    pid = demo.post("/api/pacts", json={"type": "gym", "target_days": 1, "stake": 10_000}).json()["id"]
+    with sqlite3.connect(demo.st.db_path) as con:
+        con.execute("INSERT INTO meta VALUES('held','clock moved back')")
+    assert demo.post("/api/pacts", json={"type": "steps", "target_days": 1, "stake": 10_000}).json() == {"detail": "held"}
+    assert demo.post(f"/api/pacts/{pid}/checkin", json={"value": 45}).status_code == 503
+    assert demo.get("/api/dashboard").status_code == 200  # reading stays available
+    with sqlite3.connect(demo.st.db_path) as con:
+        con.execute("DELETE FROM meta WHERE k='held'")
+    assert demo.post(f"/api/pacts/{pid}/checkin", json={"value": 45}).status_code == 200  # released: normal again

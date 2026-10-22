@@ -4,17 +4,16 @@
 
 ```mermaid
 flowchart LR
-  B[Browser] -->|HTTPS| E[edge: Caddy<br/>only published port]
-  E -->|/api/*  XFF overwritten, 16 KB cap| API[backend: FastAPI<br/>python -m app, 1 worker]
-  E -->|everything else| W[frontend: Next.js 16<br/>standalone, nonce CSP]
-  W -. server-side render .-> W
+  B[Browser] -->|HTTPS| E[edge: Caddy<br/>only published port<br/>JSON access log]
+  E -->|network back: /api/*<br/>XFF overwritten, 16 KB cap| API[backend: FastAPI<br/>python -m app, 1 worker]
+  E -->|network front: everything else| W[frontend: Next.js 16<br/>standalone, nonce CSP]
   API --> DB[(SQLite WAL<br/>volume pact-data)]
   API -->|POST phone, code| SMS[SMS provider webhook]
   S[sweeper thread] --> DB
   API --- S
 ```
 
-Trust boundaries: the internet ends at the edge. The edge is the only component that decides the client IP (`X-Forwarded-For` is overwritten with the real peer and the backend, with `TRUSTED_PROXY_HOPS=1`, believes only that last hop). Backend and frontend are not published to the host. In local development there is no edge: Next rewrites `/api` to the backend and every client shares one IP, which is acceptable for development only.
+Trust boundaries: the internet ends at the edge. The edge is the only component that decides the client IP (`X-Forwarded-For` is overwritten with the real peer and the backend, with `TRUSTED_PROXY_HOPS=1`, believes only that last hop). Backend and frontend are not published to the host, and they sit on **separate networks** (`back`, `front`; only the edge is on both), so a compromised frontend container cannot even resolve the backend. In local development there is no edge: Next rewrites `/api` to the backend and every client shares one IP, which is acceptable for development only.
 
 ## Backend (`backend/app`)
 
@@ -30,21 +29,21 @@ Trust boundaries: the internet ends at the edge. The edge is the only component 
 
 ### Data model
 
-`users(id, name, name_en, balance, points, phone UNIQUE)` · `pacts(user_id, type, target_days, stake, daily_goal, active, created, ends)` with a partial unique index so a user has at most one active pact per type · `checkins(pact_id, day, value, note)` · `txns(user_id, amount, kind, day)` · `settlements(week PK, pool, fee, charity, winners)` · `sessions(token_hash PK, user_id, expires)` · `otps(phone PK, code_hash, expires, tries, locked_until, win_start, sent)` · `meta(k, v)` (holds the ledger `epoch`) · `redemptions`.
+`users(id, name, name_en, balance, points, phone UNIQUE)` with a trigger that forbids negative balance or points · `pacts(user_id, type, target_days, stake, daily_goal, active, created, ends)` with a partial unique index so a user has at most one active pact per type; **`daily_goal` is copied onto every pact at creation, so a pact's terms never change** · `checkins(pact_id, day, value)` (no free text) · `txns(user_id, amount, kind, day)` with kinds `topup`, `reward`, `penalty`, `paused` · `settlements(week PK, pool, fee, charity, winners)` (empty weeks get a zero row) · `sessions(token_hash PK, user_id, expires)` · `otps(phone PK, code_hash, expires, tries, locked_until, win_start, sent)` (also carries the 24 h send window, so it outlives codes) · `meta(k, v)` (`epoch`, `last_sweep`, `held`).
 
 Indexes serve the three hot reads: `checkins(day, pact_id)` (the week scan), `checkins(pact_id, day)` (one user's history and streak), `pacts(user_id, active)`.
 
 ### Time
 
-All dates use `Asia/Tehran` (`APP_TZ`). The week runs Saturday to Friday. A week is settled once, after it ends, by the sweeper (every 10 minutes) or by `POST /api/admin/settle`. Weeks before the first boot of a database are never settled retroactively (`meta.epoch`).
+All dates use `Asia/Tehran` (`APP_TZ`). The week runs Saturday to Friday. A week is settled once, after it ends, by the sweeper (every 10 minutes), by the first pact created after it ended, or by `POST /api/admin/settle`. Weeks before the first boot of a database are never settled retroactively (`meta.epoch`). Settlement trusts the wall clock, so if the clock moves back or jumps the sweeper **holds** (`meta.held`, CRITICAL log) and every caller of `settle_due` obeys the hold until an operator releases it with the manual settlement. Every sweep also reconciles each balance with its ledger rows (`ledger_mismatch`) and `/api/health` reports `settled_through`.
 
 ### Settlement rules (`domain.settle`)
 
 1. A missed day costs `stake`. Nobody pays more than their balance; a shortfall is shared pro rata across that user's pacts.
 2. The pool is the sum of those losses. `fee = pool × 12 %`.
-3. Winners (every target day done) share `pool − fee` by **exposure** `stake × target_days`, each capped at **3× their own exposure**. The remainder goes to charity.
+3. Winners (every target day done) share `pool − fee` by **exposure** `stake × target_days`, each capped at **`PAYOUT_CAP_X` (default 3) × their own exposure**. The remainder goes to charity. `PAYOUT_CAP_X=0` is **charity-only mode**: nobody is ever paid from another user's stake (see the legal gate in [ROADMAP.md](ROADMAP.md)). No-money pacts (stake 0) carry zero weight.
 4. Invariant, tested on 500 random weeks: `Σ deltas + fee + charity = 0`, and no user's losses exceed their balance.
-5. After settlement, cancelled pacts end, and pacts whose owner can no longer cover a full week of exposure are paused.
+5. After settlement, cancelled pacts end, and pacts whose owner can no longer cover a full week of exposure are paused (a zero-amount `paused` ledger row and a dashboard message tell the user).
 
 Exposure weighting and the 3× cap are an **owner decision** (they bound last-day pool farming; they do not remove it while check-ins are self-reported).
 
@@ -56,7 +55,7 @@ sequenceDiagram
   participant A as API
   participant S as SMS provider
   U->>A: POST /api/auth/otp {phone}
-  A->>A: limits: ip 10/10min, phone 3/10min, daily 10, global budget
+  A->>A: limits: ip 10/10min, phone 3/10min, 10 per 24 h, global hourly budget
   A->>S: {phone, code} (5 s timeout)
   U->>A: POST /api/auth/verify {phone, code}
   A->>A: constant-time compare; 5 wrong guesses lock the phone 15 min (resend does not reset)
@@ -84,7 +83,7 @@ Next.js 16 App Router, React 19, Tailwind 4. `proxy.ts` mints a nonce per reques
 |---|---|
 | Security guard cost | Pure ASGI, no per-request task; one dict lookup per limiter key; headers appended once. |
 | Rate limiter memory | Bounded (100k keys); expired windows are dropped; fail-closed when full. |
-| Pool / board / business | One shared snapshot per 5 s, single-flight, TTL-only (no invalidate-on-write storm). A user's own data is always fresh. |
+| Pool / board / business chart | One shared cache per 5 s (`_cached`), single-flight, TTL-only (no invalidate-on-write storm). A user's own data is always fresh. The edge compresses responses, so the backend does not. |
 | DB | `synchronous=NORMAL` with WAL, indexes matching the three hot queries, 3 queries per `pacts_view` regardless of pact count. |
 | Frontend idle cost | No filter blur, no infinite JS timers; the aurora is one compositor-only layer. Measured idle: 0 ms script, 0 ms layout over 5 s. |
 | Frontend loading | Only the active script's font file loads (2 files, 81 KB for Persian); stale-while-revalidate so revisited pages paint instantly. |
@@ -101,6 +100,8 @@ Measured with `scripts` / a synthetic dataset (3,000 users, 6,000 pacts, 720k ch
 | `SMS_WEBHOOK_URL` | unset | Receives `{"phone","code","text"}`; unset outside DEMO means login answers 503. |
 | `TRUSTED_PROXY_HOPS` | `0` | Number of reverse proxies appending to `X-Forwarded-For` (compose sets 1). |
 | `RATE_LIMIT_PER_MIN` / `SMS_HOURLY_BUDGET` | 300 / 300 | Per-IP API budget; global SMS sends per hour. |
+| `PAYOUT_CAP_X` | `3` | Winner payout cap as a multiple of own exposure; `0` = charity-only mode. |
+| `LOG_KEY` | random per process | 32+ chars. Keys the phone references in logs (HMAC); set it so references stay comparable across restarts. |
 | `COOKIE_SECURE` | `1` (`0` in DEMO) | Secure + `__Host-` cookie. |
 | `APP_TZ` / `DB_PATH` / `LOG_LEVEL` | `Asia/Tehran` / `pact.db` / `INFO` | |
 

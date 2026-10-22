@@ -21,14 +21,20 @@ docker compose exec backend python -c "import urllib.request,os;r=urllib.request
 scripts/backup.sh /safe/place/pact-$(date +%F).db     # online, includes WAL content, runs integrity_check
 ```
 
-Backups are owner-only (`umask 077`). Encrypt before they leave the host: `scripts/backup.sh /dev/stdout | age -r <ops-public-key> > pact.db.age`. Schedule it (cron every hour, keep 30 days, copy off-host). **Restore drill (do it once before launch):**
+Backups are owner-only (`umask 077`). Encrypt before they leave the host: `scripts/backup.sh - | age -r <ops-public-key> > pact.db.age`. Schedule it (cron every hour, keep 30 days, copy off-host). **Restore drill (do it once before launch):**
 
 ```bash
 docker compose stop backend
-docker compose cp restored.db backend:/data/pact.db           # copies as root...
-docker compose run --rm --no-deps -u root backend sh -c 'rm -f /data/pact.db-wal /data/pact.db-shm && chown 10001:10001 /data/pact.db'   # ...so fix owner, drop stale WAL
-docker compose start backend                                  # then check /api/health and sign in
+docker compose run --rm --no-deps -T backend python -c "
+import os, shutil, sys
+os.umask(0o077)
+for f in ('/data/pact.db-wal', '/data/pact.db-shm'):       # a stale WAL would be replayed over the restored file
+    if os.path.exists(f): os.remove(f)
+with open('/data/pact.db', 'wb') as out: shutil.copyfileobj(sys.stdin.buffer, out)" < restored.db
+docker compose start backend                                 # then check /api/health and sign in
 ```
+
+This streams the file in **as the app user**, so ownership is right without root (the containers drop all capabilities, so a root `chown` would not work). Tested on 2026-10-22: wiped the ledger on a live stack, restored from `scripts/backup.sh`, 14 of 14 ledger rows and 12 of 12 users came back and the service reported healthy. If the backup is `age`-encrypted, decrypt first: `age -d -i key.txt pact.db.age > restored.db`.
 Never run `docker compose down -v` in production: it deletes the volume.
 
 ## Logs and detection

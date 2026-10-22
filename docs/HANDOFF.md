@@ -1,3 +1,5 @@
+> **Historical document (2026-10-02).** Its to-do list has been worked through on branch `feat/security-hardening-redesign`. Current state and what remains: [../LAST_Report.md](../LAST_Report.md), [ROADMAP.md](ROADMAP.md), [AUDIT_FINDINGS.md](AUDIT_FINDINGS.md). Note that its advice to set `TRUST_PROXY=1` behind the Next proxy was **wrong** (the proxy forwards a client-chosen `X-Forwarded-For`); the Caddy edge and `python -m app` replace it.
+
 # FitPeyman security/perf/UX hardening: session handoff
 
 Status as of 2026-10-02. Written so another model or engineer can continue without the original chat.

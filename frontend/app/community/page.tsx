@@ -69,7 +69,7 @@ export default function CommunityPage() {
               </span>
               <div className="min-w-0 flex-1">
                 <div className="mb-1.5 flex items-center justify-between gap-2">
-                  <b className="truncate">{lang === "fa" ? r.name : r.name_en} {r.me && <span className="ms-1 rounded-full bg-accent px-2 py-0.5 text-[10px] text-white">{t.you}</span>}</b>
+                  <b className="truncate">{lang === "fa" ? r.name : r.name_en} {r.me && <span className="ms-1 rounded-full bg-fg px-2 py-0.5 text-[11px] text-bg">{t.you}</span>}</b>
                   <span className="text-sm font-bold tabular-nums text-muted">{n(r.done)} / {n(r.target)}</span>
                 </div>
                 <Bar value={r.done / r.target} bg="var(--brand)" />

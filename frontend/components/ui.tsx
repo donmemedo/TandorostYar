@@ -118,8 +118,9 @@ export function Sheet({ open, onClose, label, children }: { open: boolean; onClo
     const d = drag.current;
     drag.current = null;
     if (!d) return;
-    const [t0, y0] = d.pts[0], [t1, y1] = d.pts[d.pts.length - 1];
-    const v = t1 > t0 ? ((y1 - y0) / (t1 - t0)) * 1000 : 0; // release velocity, px/s
+    // Release velocity from the last 100 ms of motion only: a finger that paused before letting go has no momentum.
+    const recent = d.pts.filter(([t]) => performance.now() - t < 100);
+    const v = recent.length > 1 ? ((recent[recent.length - 1][1] - recent[0][1]) / (recent[recent.length - 1][0] - recent[0][0] || 1)) * 1000 : 0; // px/s
     if (y.current + project(v) > (body.current?.offsetHeight ?? 600) * 0.5) dismiss(v);
     else cancel.current = spring(y.current, 0, v, Math.abs(v) > 300 ? 0.8 : 1, 0.35, paint, () => paint(0)); // bounce only when a flick carried momentum
   };

@@ -12,7 +12,7 @@ from .. import obs
 from ..config import Settings
 from ..db import db
 from ..deps import Cfg, User
-from ..domain import DAY_CAP, ROW_CAP, THRESHOLD, VALUE_CAP, pacts_view, pool_view, settle_due, snapshot, streak, today, week_start
+from ..domain import DAY_CAP, ROW_CAP, THRESHOLD, VALUE_CAP, pacts_view, pool_view, is_held, settle_due, snapshot, streak, today, week_start
 from .auth import public_user
 
 router = APIRouter(prefix="/api")
@@ -57,6 +57,8 @@ def create_pact(body: NewPact, u: dict = User, st: Settings = Cfg):
     with db(st.db_path, write=True) as con:
         tod = today(st.zone)  # evaluated under the write lock, once
         start = week_start(tod)
+        if is_held(con):
+            raise HTTPException(503, "held")  # fail closed: no new money commitments while the server clock is under suspicion
         settle_due(con, tod)  # a week that just ended settles BEFORE we judge affordability, never in the middle of this request
         if body.target_days > 7 - (tod - start).days:
             raise HTTPException(400, "days")  # cannot promise more days than are left in this week
@@ -97,6 +99,8 @@ def checkin(pid: Annotated[int, Path(ge=1, le=2**63 - 1)], body: CheckIn, u: dic
         tod = today(st.zone)
         start = week_start(tod)
         p = con.execute("SELECT * FROM pacts WHERE id=? AND user_id=? AND active=1", (pid, u["id"])).fetchone()
+        if is_held(con):
+            raise HTTPException(503, "held")  # check-ins are attributed to a day by the clock, so they stop too while it is suspect
         if not p:
             raise HTTPException(404, "not_found")  # also the answer for someone else's pact: no existence oracle
         if con.execute("SELECT 1 FROM settlements WHERE week=?", (start.isoformat(),)).fetchone():

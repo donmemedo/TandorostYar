@@ -73,7 +73,7 @@ export default function Today() {
                 const hits = pacts.filter((p) => p.days.includes(d));
                 const isToday = d === today, future = d > today;
                 return (
-                  <div key={d} className={`flex flex-col items-center gap-1.5 rounded-2xl py-2 ${isToday ? "bg-fg text-bg" : ""} ${future ? "opacity-40" : ""}`}>
+                  <div key={d} className={`flex flex-col items-center gap-1.5 rounded-2xl py-2 ${isToday ? "bg-fg text-bg" : ""} ${future ? "text-muted" : ""}`}>
                     <span className="text-[11px] font-bold opacity-70">{date(d, { weekday: "narrow" })}</span>
                     <span className="text-sm font-black tabular-nums">{date(d, { day: "numeric" })}</span>
                     <span className="flex h-1.5 gap-0.5">{hits.map((p) => <i key={p.id} className="h-1.5 w-1.5 rounded-full" style={{ background: TYPES[p.type].c[0] }} />)}</span>

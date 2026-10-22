@@ -71,3 +71,20 @@
 **Totals:** 49 fixed, 12 mitigated, 2 open/accepted.
 
 Two further defects were found AFTER the audit, while building and testing: SQLite cannot add a UNIQUE column (migration crash, already #3), and **uvicorn's default proxy-header handling let a same-host client pick its own IP** (found by the live pen test, fixed with `python -m app`). A third, cancelled pacts surviving an early demo close, was found by running the suite on every weekday.
+
+
+## Second round: independent review panel
+
+After the fixes above, six more agents (Product Owner, Tech Lead, Red Team, Blue Team, QA, ponytail) reviewed the new code read-only. They found 72 further items; each is recorded with its outcome in [ROADMAP.md](ROADMAP.md#review-log). The most important real bugs they caught in the first round of fixes, **all of which the first round of tests had missed**, are now fixed and covered by regression tests:
+
+| Found by | Defect | Regression test |
+|---|---|---|
+| Red + Blue | The 10-per-day OTP send cap never applied: the sweeper and every successful login deleted the row holding its counter (about 432 SMS a day to one victim instead of 10) | `test_the_daily_otp_send_cap_survives_logins_and_the_sweeper` |
+| Red | `create_pact` settled a live week while the clock-safety hold was on | `test_create_pact_never_settles_while_the_hold_is_on` |
+| Red | IPv6 clients were keyed by full address (2^64 keys per subscriber); IPv4-mapped addresses split one client in two | `test_ipv6_clients_are_keyed_by_subscriber_not_by_address` |
+| Red | Provider-rejected numbers were refunded, so they bypassed every OTP limit | `test_provider_rejections_still_cost_the_caller_but_outages_do_not` |
+| Red | Rejected requests skipped the rate limiter and could write unbounded log lines to scroll evidence away | `test_rejected_requests_spend_the_rate_limit_budget_too`, `test_guard_rejections_are_logged_a_bounded_number_of_times` |
+| Red + Blue | Log phone references were an unkeyed hash, reversible in minutes | `test_log_phone_references_are_keyed_not_a_bare_hash` |
+| Tech Lead | `/api/community` could answer 500 for 5 s after settlement; an SMS outage burnt every login budget; settlement was untested in production mode | `test_community_survives_a_settlement_...`, `test_an_sms_outage_does_not_burn_the_login_budgets`, `test_the_sweeper_catches_up_several_weeks_...` |
+| Blue | A compromised frontend container could reach the backend and set any client IP; account deletion kept notes and the OTP row; backups were world-readable | compose networks + CI assertion; `test_account_deletion_erases_activity_pacts_and_otp_row`; `umask 077` |
+| QA | A huge pact id returned 500; steps entry broke on Persian keyboards; a failed seal left the button dead | `test_a_huge_pact_id_...`, `digits.test.ts`, `HoldButton` remount |

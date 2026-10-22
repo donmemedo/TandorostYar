@@ -162,10 +162,15 @@ def settle_week(con, start: date, tod: date, end: date | None = None):
     return {"week": week, "pool": pool, "fee": fee, "charity": charity, "deltas": deltas, "owner": owner}
 
 
+def is_held(con) -> bool:
+    """True while the clock-safety hold is on (see main.sweep)."""
+    return con.execute("SELECT 1 FROM meta WHERE k='held'").fetchone() is not None
+
+
 def settle_due(con, tod: date):
     """Settle every completed, unsettled week since the ledger epoch (at most the last four). Safe to call any time.
     Does nothing while the clock-safety hold is on, no matter who calls it (sweeper, create_pact, admin after it clears the hold)."""
-    if con.execute("SELECT 1 FROM meta WHERE k='held'").fetchone():
+    if is_held(con):
         return []
     epoch = con.execute("SELECT v FROM meta WHERE k='epoch'").fetchone()
     first = date.fromisoformat(epoch["v"]) if epoch else week_start(tod)
