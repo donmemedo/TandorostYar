@@ -5,7 +5,7 @@ WORKDIR /w
 COPY requirements.txt .
 # retry: flaky networks drop DNS mid-install; the cache keeps finished downloads
 RUN python -m venv /opt/venv && \
-    for i in 1 2 3 4 5 6; do /opt/venv/bin/pip install --no-cache-dir --retries 10 --timeout 60 --require-hashes -r requirements.txt && break; sleep 10; done; \
+    for _ in 1 2 3 4 5 6; do /opt/venv/bin/pip install --no-cache-dir --retries 10 --timeout 60 --require-hashes -r requirements.txt && break; sleep 10; done; \
     /opt/venv/bin/python -c "import fastapi, uvicorn, zoneinfo; zoneinfo.ZoneInfo('Asia/Tehran')"
 
 FROM python:3.12-slim-bookworm@sha256:6a0e06f5ba0b373d051aabd3fffb9b873f27f9a2a3a14bcbe37dee6f0e3bbc70

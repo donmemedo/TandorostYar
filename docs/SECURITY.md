@@ -71,7 +71,7 @@ G4  EXFILTRATE USER DATA  (OR)
 
 G5  SUPPLY CHAIN  (OR)
 ├─ 5.1 Poisoned dependency                                              cost med   skill high   Det: CI                 MITIGATED: hash-locked pip, npm lockfile, audits, Dependabot
-├─ 5.2 Stale internet-facing edge image                                 cost low   skill med    Det: CI                 CLOSED: digest pinned, Dependabot compose ecosystem, Trivy scans it
+├─ 5.2 Stale internet-facing edge image                                 cost low   skill med    Det: CI                 MITIGATED: digest pinned, Dependabot compose ecosystem, Trivy scans it. Five HIGH Go CVEs in the NEWEST upstream Caddy are excepted until 2026-11-05 (.trivyignore.yaml): see PENTEST_REPORT
 └─ 5.3 Hijacked CI scanner                                              cost med   skill high   Det: —                  MITIGATED: Actions pinned by SHA; bandit/pip-audit/semgrep pinned by version
 ```
 

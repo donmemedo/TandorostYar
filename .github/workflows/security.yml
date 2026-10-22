@@ -106,7 +106,7 @@ jobs:
       - id: caddy
         run: echo "ref=$(grep -oE 'caddy:2-alpine@sha256:[0-9a-f]+' docker-compose.yml | head -1)" >> "$GITHUB_OUTPUT"
       - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with: { image-ref: "${{ steps.caddy.outputs.ref }}", severity: "CRITICAL,HIGH", ignore-unfixed: true, exit-code: "1" }
+        with: { image-ref: "${{ steps.caddy.outputs.ref }}", severity: "CRITICAL,HIGH", ignore-unfixed: true, exit-code: "1", trivyignores: ".trivyignore.yaml" }
       - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with: { image-ref: fitpeyman-backend:local, severity: "CRITICAL,HIGH", ignore-unfixed: true, exit-code: "1" }
       - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
