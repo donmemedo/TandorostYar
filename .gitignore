@@ -2,8 +2,24 @@ node_modules/
 .next/
 .venv/
 __pycache__/
+*.pyc
+.pytest_cache/
 backend/data/
 *.log
-
-Docs
+*.db
+*.db-wal
+*.db-shm
+*.db.tmp
+backup-*
+pact-backup.*
+*.age
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+skills-lock.json
+graphify-out/*
+!graphify-out/GRAPH_REPORT.md
 .idea
+# local business-plan PDFs live in ./Docs (capital D); written documentation lives in ./docs
+Docs/*.pdf

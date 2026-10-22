@@ -1,0 +1,6 @@
+# Opt-in for networks where image builds cannot resolve DNS:
+#   docker compose -f docker-compose.yml -f docker-compose.hostnet.yml build
+# Off by default: host networking during a build weakens isolation.
+services:
+  backend: { build: { network: host } }
+  frontend: { build: { network: host } }

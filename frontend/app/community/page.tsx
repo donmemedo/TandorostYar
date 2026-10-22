@@ -1,12 +1,12 @@
 "use client";
 import { Crown, Lock, Sparkles } from "lucide-react";
 import { useState } from "react";
-import { Bar, CountUp, Failed, Loading, PageTitle, Sheet, Toast, css, useToast } from "@/components/ui";
+import { Bar, ConfirmSheet, CountUp, Failed, Loading, PageTitle, Sheet, Toast, css, useToast } from "@/components/ui";
 import { post, useApi, type Pool } from "@/lib/api";
-import { useT } from "@/lib/i18n";
+import { errText, useT } from "@/lib/i18n";
 
 type Row = { id: number; name: string; name_en: string; done: number; target: number; me: boolean };
-type Community = { pool: Pool; leaderboard: Row[]; last: { week: string } | null; week: string };
+type Community = { pool: Pool; leaderboard: Row[]; last: { week: string } | null; week: string; demo: boolean };
 type Result = { mine: number; pool: number; fee: number; charity: number };
 const MEDAL = ["#ffd60a", "#c7c7cc", "#ff9f0a"];
 
@@ -14,6 +14,7 @@ export default function CommunityPage() {
   const { t, n, money, lang, pct } = useT();
   const { data, error, reload } = useApi<Community>("/community");
   const [result, setResult] = useState<Result>();
+  const [confirm, setConfirm] = useState(false);
   const [msg, toast] = useToast();
   if (error) return <Failed retry={reload} />;
   if (!data) return <Loading />;
@@ -22,15 +23,16 @@ export default function CommunityPage() {
   const feePct = pct(Math.round(pool.fee_rate * 100));
 
   const settle = async () => {
+    setConfirm(false);
     try { setResult(await post<Result>("/settle")); reload(); }
-    catch (e) { toast(t.err[(e as Error).message as keyof typeof t.err] ?? t.err.generic); }
+    catch (e) { toast(errText(t, e)); }
   };
 
   return (
     <>
       <Toast msg={msg} />
       <PageTitle title={t.nav.community} sub={t.pool}>
-        <button className="btn btn-ghost" onClick={settle} disabled={closed}>{closed ? <Lock size={16} /> : <Sparkles size={16} />} {t.settle} · {t.demo}</button>
+        {data.demo && <button className="btn btn-ghost" onClick={() => setConfirm(true)} disabled={closed}>{closed ? <Lock size={16} aria-hidden /> : <Sparkles size={16} aria-hidden />} {t.settle} · {t.demo}</button>}
       </PageTitle>
 
       <section className="card rise overflow-hidden p-6 md:p-10">
@@ -59,7 +61,7 @@ export default function CommunityPage() {
           {leaderboard.map((r, i) => (
             <li key={r.id} className={`card rise flex items-center gap-4 p-4 ${r.me ? "ring-2 ring-accent" : ""}`} style={css({ "--i": i + 2 })}>
               <span className="grid w-7 place-items-center text-lg font-black tabular-nums text-muted">
-                {i < 3 ? <Crown size={22} fill={MEDAL[i]} stroke={MEDAL[i]} /> : n(i + 1)}
+                {i < 3 ? <Crown size={22} fill={MEDAL[i]} stroke={MEDAL[i]} aria-label={n(i + 1)} /> : n(i + 1)}
               </span>
               <span className="grid h-11 w-11 shrink-0 place-items-center rounded-full text-lg font-black text-white"
                 style={{ background: `linear-gradient(135deg, hsl(${r.id * 47} 90% 60%), hsl(${r.id * 47 + 50} 90% 50%))` }}>
@@ -67,7 +69,7 @@ export default function CommunityPage() {
               </span>
               <div className="min-w-0 flex-1">
                 <div className="mb-1.5 flex items-center justify-between gap-2">
-                  <b className="truncate">{lang === "fa" ? r.name : r.name_en} {r.me && <span className="ms-1 rounded-full bg-accent px-2 py-0.5 text-[10px] text-white">{t.you}</span>}</b>
+                  <b className="truncate">{lang === "fa" ? r.name : r.name_en} {r.me && <span className="ms-1 rounded-full bg-fg px-2 py-0.5 text-[11px] text-bg">{t.you}</span>}</b>
                   <span className="text-sm font-bold tabular-nums text-muted">{n(r.done)} / {n(r.target)}</span>
                 </div>
                 <Bar value={r.done / r.target} bg="var(--brand)" />
@@ -77,7 +79,8 @@ export default function CommunityPage() {
         </ol>
       </section>
 
-      <Sheet open={!!result} onClose={() => setResult(undefined)}>
+      <ConfirmSheet open={confirm} title={t.settleTitle} body={t.settleBody} confirm={t.confirm} onConfirm={settle} onClose={() => setConfirm(false)} />
+      <Sheet open={!!result} onClose={() => setResult(undefined)} label={t.result}>
         {result && (
           <div className="space-y-5 text-center">
             <h2 className="text-2xl font-black">{t.result}</h2>

@@ -1,0 +1,19 @@
+# Time-boxed exceptions. Each one has an expiry: after it, the scan fails again and someone must look.
+vulnerabilities:
+  - id: CVE-2026-78669        # net/http HTTP/2 DoS (Go stdlib and golang.org/x/net)
+    statement: >-
+      The newest upstream caddy:2-alpine image (checked 2026-10-22) is still built with Go 1.26.8 / x/net 0.59.0; the fixes need Go 1.26.10 / x/net 0.60.0.
+      Exposure: the edge terminates HTTP/2 on the public listener. Mitigated by read/write/idle timeouts and a 16 KB body cap in edge/Caddyfile, 128 MB / pid limits,
+      and a read-only, capability-less container. Dependabot (docker-compose ecosystem) will open the PR when upstream rebuilds.
+    expired_at: 2026-11-05
+  - id: CVE-2026-78667        # net/http crafted-request DoS (Go stdlib)
+    statement: Same cause and mitigations as CVE-2026-78669.
+    expired_at: 2026-11-05
+  - id: CVE-2026-97031        # crypto/tls DoS (Go stdlib)
+    statement: Same cause and mitigations as CVE-2026-78669.
+    expired_at: 2026-11-05
+  - id: CVE-2026-111943       # crypto/x509 man-in-the-middle (Go stdlib)
+    statement: >-
+      Same upstream cause. Affects certificate verification on OUTBOUND TLS; the edge makes no outbound TLS connections except ACME certificate issuance when
+      SITE_ADDRESS is a domain. Revisit before enabling a public domain if upstream has not rebuilt.
+    expired_at: 2026-11-05

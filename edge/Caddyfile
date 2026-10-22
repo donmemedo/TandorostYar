@@ -1,0 +1,68 @@
+# The only service that publishes a port. It is the one place the client IP is decided: X-Forwarded-For is OVERWRITTEN
+# with the real peer, and the backend (TRUSTED_PROXY_HOPS=1) believes only that last hop.
+{
+	admin off
+	servers {
+		timeouts {
+			read_header 5s
+			read_body 10s
+			write 30s
+			idle 60s
+		}
+	}
+}
+
+# Loopback-only listener for the container healthcheck (works whatever SITE_ADDRESS is).
+:8081 {
+	bind 127.0.0.1
+	respond /healthz "ok" 200
+}
+
+# SITE_ADDRESS=:80 for local/LAN; a domain name (e.g. app.example.ir) switches on automatic HTTPS.
+{$SITE_ADDRESS::80} {
+	encode zstd gzip
+
+	# The edge writes its own JSON access log (it answers the admin/docs 404s, 413s and every scanner probe itself, and the backend
+	# never sees those). Cookie and Authorization headers are redacted by default; never enable log_credentials.
+	log {
+		output stdout
+		format json
+	}
+
+	# The edge, not the client, mints the request id: it ties this log to the backend's and cannot be forged.
+	request_header X-Request-ID {http.request.uuid}
+
+	# Operator-only surfaces never leave the host network: use `docker compose exec backend ...` instead.
+	# This MUST be a `handle` placed before `handle /api/*`: Caddy runs handle blocks before bare directives like `respond`.
+	@internal path /api/admin/* /api/docs* /api/openapi.json /docs /openapi.json
+	handle @internal {
+		respond 404
+	}
+
+	header {
+		-Server
+		X-Content-Type-Options nosniff
+	}
+	@https protocol https
+	header @https Strict-Transport-Security "max-age=31536000; includeSubDomains"
+
+	handle /api/* {
+		request_body {
+			max_size 16KB
+		}
+		reverse_proxy backend:8000 {
+			header_up X-Forwarded-For {remote_host}
+			header_up -X-Real-IP
+			transport http {
+				dial_timeout 3s
+				response_header_timeout 15s
+			}
+		}
+	}
+
+	handle {
+		reverse_proxy frontend:3000 {
+			header_up X-Forwarded-For {remote_host}
+		}
+	}
+}

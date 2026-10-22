@@ -1,0 +1,128 @@
+name: CI and security gates
+
+on:
+  push: { branches: [main] }
+  pull_request: { branches: [main] }
+  schedule: [{ cron: "17 3 * * 1" }] # weekly: new advisories appear without new commits
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend tests (${{ matrix.today || 'real date' }}), SAST, dependencies
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: backend } }
+    strategy:
+      fail-fast: false
+      matrix:
+        # Saturday..Friday: week-position bugs (days left, early close, cancellation) only show on some weekdays
+        today: ["", "2026-10-17", "2026-10-18", "2026-10-19", "2026-10-20", "2026-10-21", "2026-10-22", "2026-10-23"]
+    env: { FAKE_TODAY: "${{ matrix.today }}" }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with: { python-version: "3.12" }
+      - run: pip install --require-hashes -r requirements.txt && pip install -r requirements-dev.txt bandit==1.9.4 pip-audit==2.10.1
+      - run: python -m pytest -q --timeout=60
+      - name: Bandit (medium+ only; B608 sites carry reviewed nosec notes)
+        if: matrix.today == ''
+        run: bandit -r app -ll
+      - name: Known vulnerabilities in locked dependencies
+        if: matrix.today == ''
+        run: pip-audit -r requirements.txt --require-hashes
+
+  frontend:
+    name: Frontend typecheck, build, dependencies
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: frontend } }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with: { node-version: 24, cache: npm, cache-dependency-path: frontend/package-lock.json }
+      - run: npm ci --no-fund
+      - run: npx tsc --noEmit
+      - run: npm test
+      - run: npm run build
+      - run: npm audit --audit-level=high
+
+  secrets:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { fetch-depth: 0 }
+      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+        env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+
+  sast:
+    name: SAST (Semgrep)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with: { python-version: "3.12" }
+      - run: pip install semgrep==1.179.0
+      - run: >
+          semgrep scan --metrics=off --error --severity ERROR --severity WARNING
+          --config p/security-audit --config p/owasp-top-ten --config p/python --config p/typescript
+          backend/app frontend/app frontend/components frontend/lib frontend/proxy.ts frontend/next.config.ts
+
+  containers:
+    name: Images, Trivy, live pen-test script
+    runs-on: ubuntu-latest
+    needs: [backend, frontend]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: hadolint/hadolint-action@54c9adbab1582c2ef04b2016b760714a4bfde3cf # v3.1.0
+        with: { dockerfile: backend/Dockerfile }
+      - uses: hadolint/hadolint-action@54c9adbab1582c2ef04b2016b760714a4bfde3cf # v3.1.0
+        with: { dockerfile: frontend/Dockerfile }
+      - run: DEMO=1 docker compose up -d --build --wait --wait-timeout 300
+      - name: Black-box security checks against the running stack
+        run: python3 scripts/pentest.py http://127.0.0.1:3330
+      - name: Hardening the compose file promises (fails if a PR removes any of it)
+        run: |
+          fail() { echo "HARDENING REGRESSION: $1"; exit 1; }
+          for c in backend frontend edge; do
+            id=$(docker compose ps -q $c)
+            [ "$(docker inspect -f '{{.HostConfig.ReadonlyRootfs}}' $id)" = true ] || fail "$c root filesystem is writable"
+            docker inspect -f '{{json .HostConfig.CapDrop}}' $id | grep -q ALL || fail "$c does not drop all capabilities"
+            docker inspect -f '{{json .HostConfig.SecurityOpt}}' $id | grep -q no-new-privileges || fail "$c allows privilege escalation"
+          done
+          for c in backend frontend; do
+            u=$(docker inspect -f '{{.Config.User}}' $(docker compose ps -q $c))
+            [ -n "$u" ] && [ "$u" != root ] && [ "$u" != 0 ] || fail "$c runs as root"
+          done
+          for c in backend frontend; do  # `docker compose port` prints ":0" for an unpublished port, so inspect the real host bindings
+            [ -z "$(docker inspect -f '{{range $p, $b := .NetworkSettings.Ports}}{{if $b}}{{$p}} {{end}}{{end}}' $(docker compose ps -q $c))" ] || fail "$c is published to the host"
+          done
+          docker compose exec -T frontend node -e "fetch('http://backend:8000/api/health',{signal:AbortSignal.timeout(3000)}).then(()=>process.exit(1)).catch(()=>process.exit(0))" || fail "frontend can reach the backend"
+          echo "hardening assertions passed"
+      - id: caddy
+        run: echo "ref=$(grep -oE 'caddy:2-alpine@sha256:[0-9a-f]+' docker-compose.yml | head -1)" >> "$GITHUB_OUTPUT"
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with: { image-ref: "${{ steps.caddy.outputs.ref }}", severity: "CRITICAL,HIGH", ignore-unfixed: true, exit-code: "1", trivyignores: ".trivyignore.yaml" }
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with: { image-ref: fitpeyman-backend:local, severity: "CRITICAL,HIGH", ignore-unfixed: true, exit-code: "1" }
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with: { image-ref: fitpeyman-frontend:local, severity: "CRITICAL,HIGH", ignore-unfixed: true, exit-code: "1" }
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with: { image-ref: fitpeyman-backend:local, format: cyclonedx, output: sbom-backend.json }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with: { name: sbom, path: sbom-backend.json }
+      - if: always()
+        run: docker compose down -v
+
+  gate:
+    name: Security gate
+    runs-on: ubuntu-latest
+    needs: [backend, frontend, secrets, sast, containers]
+    if: always()
+    steps:
+      - run: |
+          echo '${{ toJSON(needs) }}' | python3 -c "import json,sys; n=json.load(sys.stdin); bad=[k for k,v in n.items() if v['result']!='success']; print('failed:',bad); sys.exit(1 if bad else 0)"

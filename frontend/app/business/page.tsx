@@ -1,13 +1,16 @@
 "use client";
 import { Check } from "lucide-react";
+import Link from "next/link";
 import { Bar, CountUp, Failed, Loading, TYPES, css, grad } from "@/components/ui";
 import { useApi, type PactType } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 import { useT } from "@/lib/i18n";
 
 type Biz = { members: number; pacts: number; completion: Partial<Record<PactType, number>>; daily: { day: string; n: number }[] };
 
 export default function Business() {
   const { t, n, date, pct } = useT();
+  const { status } = useAuth();
   const { data, error, reload } = useApi<Biz>("/business");
   if (error) return <Failed retry={reload} />;
   if (!data) return <Loading />;
@@ -22,7 +25,10 @@ export default function Business() {
           <span className="brand-text">{t.bizTitle}</span>
         </h1>
         <p className="mt-4 max-w-2xl text-lg leading-8 text-muted">{t.bizSub}</p>
-        <a href="#pricing" className="btn btn-primary mt-6">{t.bizCta}</a>
+        <div className="mt-6 flex flex-wrap gap-3">
+          <a href="#pricing" className="btn btn-primary">{t.bizCta}</a>
+          {status === "out" && <Link href="/" className="btn btn-ghost">{t.login.verify}</Link>}
+        </div>
       </header>
 
       <section className="grid grid-cols-2 gap-4 md:grid-cols-3">
@@ -57,7 +63,6 @@ export default function Business() {
               </div>
             ))}
           </div>
-          <style>{`@keyframes grow-y{from{transform:scaleY(0)}}`}</style>
         </div>
       </section>
 
@@ -81,7 +86,7 @@ export default function Business() {
             );
           })}
         </div>
-        <p className="mt-5 text-sm text-muted">{t.feeNote(pct(12))}</p>
+        <p className="mt-5 text-sm text-muted">{t.feeNote(pct(12))} {t.priceNote}</p>
       </section>
     </div>
   );

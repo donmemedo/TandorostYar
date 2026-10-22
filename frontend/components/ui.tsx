@@ -1,6 +1,6 @@
 "use client";
 import { Dumbbell, Footprints, Salad } from "lucide-react";
-import { useEffect, useId, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type CSSProperties, type PointerEvent, type ReactNode } from "react";
 import type { PactType } from "@/lib/api";
 import { useT } from "@/lib/i18n";
 
@@ -11,12 +11,32 @@ export const TYPES: Record<PactType, { c: [string, string]; icon: typeof Dumbbel
 };
 export const grad = (t: PactType) => `linear-gradient(135deg, ${TYPES[t].c[0]}, ${TYPES[t].c[1]})`;
 export const css = (o: Record<string, string | number>) => o as CSSProperties;
+const reduced = () => typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-export function Rings({ items, size = 240 }: { items: { value: number; c: [string, string] }[]; size?: number }) {
+/** Damped spring (Apple's damping-ratio / response parameters). Starts from the CURRENT value and velocity, so it can be
+ *  interrupted and re-targeted at any instant. Returns a cancel function. */
+function spring(from: number, to: number, v0: number, damping: number, response: number, step: (x: number) => void, done: () => void) {
+  const w = (2 * Math.PI) / response;
+  let x = from, v = v0, last = performance.now(), raf = 0;
+  const tick = (now: number) => {
+    const h = Math.min(0.032, (now - last) / 1000) / 4;
+    last = now;
+    for (let i = 0; i < 4; i++) { v += (-w * w * (x - to) - 2 * damping * w * v) * h; x += v * h; }
+    if (Math.abs(x - to) < 0.5 && Math.abs(v) < 8) { step(to); done(); return; }
+    step(x);
+    raf = requestAnimationFrame(tick);
+  };
+  raf = requestAnimationFrame(tick);
+  return () => cancelAnimationFrame(raf);
+}
+const project = (v: number, rate = 0.998) => ((v / 1000) * rate) / (1 - rate); // where a flick would coast to (px)
+const rubber = (over: number, dim = 400, k = 0.55) => (over * dim * k) / (dim + k * Math.abs(over)); // resistance past an edge
+
+export function Rings({ items, size = 240, label }: { items: { value: number; c: [string, string] }[]; size?: number; label?: string }) {
   const id = useId().replace(/[^\w-]/g, "");
   const s = size * 0.09, h = size / 2;
   return (
-    <svg viewBox={`0 0 ${size} ${size}`} width={size} height={size} className="max-w-full h-auto" aria-hidden>
+    <svg viewBox={`0 0 ${size} ${size}`} width={size} height={size} className="h-auto max-w-full" role={label ? "img" : undefined} aria-label={label} aria-hidden={label ? undefined : true}>
       {items.map((it, i) => {
         const r = h - s / 2 - i * s * 1.18, c = 2 * Math.PI * r;
         return (
@@ -26,7 +46,7 @@ export function Rings({ items, size = 240 }: { items: { value: number; c: [strin
             </defs>
             <circle cx={h} cy={h} r={r} fill="none" stroke={it.c[1]} strokeOpacity={0.16} strokeWidth={s} />
             <circle className="ring-arc" cx={h} cy={h} r={r} fill="none" stroke={`url(#${id}${i})`} strokeWidth={s} strokeLinecap="round"
-              strokeDasharray={c} strokeDashoffset={c * (1 - Math.min(it.value, 1))} style={css({ "--c": c, "--gc": it.c[0], animationDelay: `${i * 140}ms` })} />
+              strokeDasharray={c} strokeDashoffset={c * (1 - Math.min(it.value, 1))} style={css({ "--c": c, animationDelay: `${i * 140}ms` })} />
           </g>
         );
       })}
@@ -34,75 +54,141 @@ export function Rings({ items, size = 240 }: { items: { value: number; c: [strin
   );
 }
 
+/** Counts up by writing straight to the text node: no React render per frame. */
 export function CountUp({ value, format }: { value: number; format: (n: number) => string }) {
-  const [v, setV] = useState(0);
+  const el = useRef<HTMLSpanElement>(null);
   const from = useRef(0);
+  const fmt = useRef(format);
+  fmt.current = format;
+  const first = useRef(format(0)).current;
   useEffect(() => {
-    const a = from.current, t0 = performance.now();
+    const node = el.current!, a = from.current;
+    if (reduced() || a === value) { node.textContent = fmt.current(value); from.current = value; return; }
+    const t0 = performance.now();
     let raf = 0;
     const tick = (t: number) => {
-      const p = Math.min(1, Math.max(0, (t - t0) / 1400));
-      setV(Math.round(a + (value - a) * (1 - (1 - p) ** 4)));
-      if (p < 1) raf = requestAnimationFrame(tick);
+      const p = Math.min(1, (t - t0) / 900);
+      node.textContent = fmt.current(Math.round(a + (value - a) * (1 - (1 - p) ** 4)));
+      if (p < 1) raf = requestAnimationFrame(tick); else from.current = value;
     };
     raf = requestAnimationFrame(tick);
-    return () => { from.current = value; cancelAnimationFrame(raf); };
+    return () => { cancelAnimationFrame(raf); from.current = value; };
   }, [value]);
-  return <span className="tabular-nums">{format(v)}</span>;
+  return <span ref={el}>{first}</span>;
 }
 
 export function Bar({ value, bg }: { value: number; bg: string }) {
-  return <div className="bar"><i style={{ width: `${Math.min(value, 1) * 100}%`, background: bg }} /></div>;
+  return <div className="bar" aria-hidden><i style={{ width: `${Math.min(Math.max(value, 0), 1) * 100}%`, background: bg }} /></div>;
 }
 
-export function Sheet({ open, onClose, children }: { open: boolean; onClose: () => void; children: ReactNode }) {
-  const ref = useRef<HTMLDialogElement>(null);
+/** Bottom sheet on phones (drag the handle: 1:1 tracking, rubber-band upward, momentum-projected dismiss, spring back), centred modal on desktop. */
+export function Sheet({ open, onClose, label, children }: { open: boolean; onClose: () => void; label: string; children: ReactNode }) {
+  const ref = useRef<HTMLDialogElement>(null), body = useRef<HTMLDivElement>(null);
+  const y = useRef(0), cancel = useRef<() => void>(() => {}), drag = useRef<{ off: number; pts: [number, number][] } | null>(null);
+  const paint = (v: number) => {
+    y.current = v;
+    if (body.current) body.current.style.transform = v ? `translate3d(0,${v}px,0)` : "";
+    ref.current?.style.setProperty("--dim", String(Math.max(0, 1 - v / (body.current?.offsetHeight || 1))));
+  };
   useEffect(() => {
     const d = ref.current!;
-    if (open && !d.open) d.showModal();
+    if (open && !d.open) { cancel.current(); paint(0); d.showModal(); }
     if (!open && d.open) d.close();
   }, [open]);
+
+  const dismiss = (v0 = 0) => {
+    if (reduced()) return onClose();
+    cancel.current();
+    cancel.current = spring(y.current, (body.current?.offsetHeight ?? 600) + 40, v0, 1, 0.35, paint, onClose);
+  };
+  const down = (e: PointerEvent) => {
+    cancel.current(); // grabbing a moving sheet stops it where it is
+    e.currentTarget.setPointerCapture(e.pointerId);
+    drag.current = { off: e.clientY - y.current, pts: [[performance.now(), e.clientY]] };
+  };
+  const move = (e: PointerEvent) => {
+    const d = drag.current;
+    if (!d) return;
+    const raw = e.clientY - d.off;
+    paint(raw < 0 ? rubber(raw) : raw);
+    d.pts.push([performance.now(), e.clientY]);
+    if (d.pts.length > 6) d.pts.shift();
+  };
+  const up = () => {
+    const d = drag.current;
+    drag.current = null;
+    if (!d) return;
+    // Release velocity from the last 100 ms of motion only: a finger that paused before letting go has no momentum.
+    const recent = d.pts.filter(([t]) => performance.now() - t < 100);
+    const v = recent.length > 1 ? ((recent[recent.length - 1][1] - recent[0][1]) / (recent[recent.length - 1][0] - recent[0][0] || 1)) * 1000 : 0; // px/s
+    if (y.current + project(v) > (body.current?.offsetHeight ?? 600) * 0.5) dismiss(v);
+    else cancel.current = spring(y.current, 0, v, Math.abs(v) > 300 ? 0.8 : 1, 0.35, paint, () => paint(0)); // bounce only when a flick carried momentum
+  };
+
   return (
-    <dialog ref={ref} className="sheet" onClose={onClose} onClick={(e) => e.target === ref.current && onClose()}>
-      <div className="sheet-body">
-        <div className="mx-auto mb-4 h-1.5 w-10 rounded-full bg-line md:hidden" />
+    <dialog ref={ref} className="sheet" aria-label={label} onClose={onClose} onCancel={(e) => { e.preventDefault(); dismiss(); }}
+      onClick={(e) => e.target === ref.current && dismiss()}>
+      <div ref={body} className="sheet-body">
+        <div className="sheet-grab" aria-hidden onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up} />
         {open && children}
       </div>
     </dialog>
   );
 }
 
-export function HoldButton({ label, onDone, ms = 1300 }: { label: string; onDone: () => void; ms?: number }) {
-  const [p, setP] = useState(0);
-  const raf = useRef(0);
+export function ConfirmSheet({ open, title, body, confirm, danger, busy, onConfirm, onClose }:
+  { open: boolean; title: string; body: string; confirm: string; danger?: boolean; busy?: boolean; onConfirm: () => void; onClose: () => void }) {
+  const { t } = useT();
+  return (
+    <Sheet open={open} onClose={onClose} label={title}>
+      <div className="space-y-4">
+        <h2 className="text-2xl font-black">{title}</h2>
+        <p className="leading-7 text-muted">{body}</p>
+        <div className="flex gap-2">
+          <button className="btn btn-ghost" onClick={onClose}>{t.cancel}</button>
+          <button className={`btn flex-1 ${danger ? "btn-danger" : "btn-primary"}`} disabled={busy} onClick={onConfirm}>{confirm}</button>
+        </div>
+      </div>
+    </Sheet>
+  );
+}
+
+/** Press and hold to commit. Keyboard and assistive tech activate it with a normal click (detail 0), so nobody is locked out. */
+export function HoldButton({ label, hint, onDone, ms = 1300 }: { label: string; hint: string; onDone: () => void; ms?: number }) {
+  const btn = useRef<HTMLButtonElement>(null), raf = useRef(0), fired = useRef(false), hid = useId();
+  const paint = (x: number) => { btn.current?.style.setProperty("--p", String(x)); if (btn.current) btn.current.dataset.on = x > 0.5 ? "1" : ""; };
+  const fire = () => { if (fired.current) return; fired.current = true; navigator.vibrate?.([20, 40, 30]); onDone(); };
   const start = () => {
+    cancelAnimationFrame(raf.current);
     const t0 = performance.now();
     const tick = (t: number) => {
       const x = Math.min(1, (t - t0) / ms);
-      setP(x);
-      if (x < 1) raf.current = requestAnimationFrame(tick);
-      else { navigator.vibrate?.([20, 40, 30]); onDone(); }
+      paint(x);
+      if (x < 1) raf.current = requestAnimationFrame(tick); else fire();
     };
-    cancelAnimationFrame(raf.current);
     raf.current = requestAnimationFrame(tick);
   };
-  const stop = () => { cancelAnimationFrame(raf.current); setP((x) => (x >= 1 ? 1 : 0)); };
+  const stop = () => { cancelAnimationFrame(raf.current); if (!fired.current) paint(0); };
+  useEffect(() => () => cancelAnimationFrame(raf.current), []);
   return (
-    <button type="button" className="btn btn-primary hold w-full h-14 text-base" style={css({ "--p": p })}
-      onPointerDown={start} onPointerUp={stop} onPointerLeave={stop} onPointerCancel={stop} onContextMenu={(e) => e.preventDefault()}
-      onKeyDown={(e) => (e.key === " " || e.key === "Enter") && !e.repeat && (e.preventDefault(), start())} onKeyUp={stop}>
-      <span className="hold-fill" />
-      <span className="relative" style={{ color: p > 0.5 ? "#fff" : undefined }}>{label}</span>
-    </button>
+    <>
+      <button ref={btn} type="button" className="btn btn-primary hold h-14 w-full text-base" aria-describedby={hid} style={css({ "--p": 0 })}
+        onPointerDown={start} onPointerUp={stop} onPointerLeave={stop} onPointerCancel={stop} onContextMenu={(e) => e.preventDefault()}
+        onClick={(e) => { if (e.detail === 0) { paint(1); fire(); } }}>
+        <span className="hold-fill" />
+        <span className="hold-label relative">{label}</span>
+      </button>
+      <span id={hid} className="sr-only">{hint}</span>
+    </>
   );
 }
 
 export function Success({ label }: { label: string }) {
   return (
-    <div className="grid place-items-center gap-3 py-8 text-center">
-      <div className="burst">
+    <div role="status" className="grid place-items-center gap-3 py-8 text-center">
+      <div className="burst" aria-hidden>
         {Array.from({ length: 12 }, (_, k) => <i key={k} style={css({ "--k": k })} />)}
-        <svg width="84" height="84" viewBox="0 0 84 84" aria-hidden>
+        <svg width="84" height="84" viewBox="0 0 84 84">
           <circle cx="42" cy="42" r="40" fill="var(--good)" />
           <path className="check-draw" d="M26 43l11 11 22-24" fill="none" stroke="#fff" strokeWidth="7" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
@@ -113,8 +199,10 @@ export function Success({ label }: { label: string }) {
 }
 
 export function Loading() {
+  const { t } = useT();
   return (
-    <div className="space-y-5" aria-busy>
+    <div className="space-y-5" aria-busy role="status">
+      <span className="sr-only">{t.loading}</span>
       <div className="skeleton h-16 w-2/3" />
       <div className="skeleton h-72" />
       <div className="grid gap-4 sm:grid-cols-3">{[0, 1, 2].map((i) => <div key={i} className="skeleton h-44" />)}</div>
@@ -122,11 +210,11 @@ export function Loading() {
   );
 }
 
-export function Failed({ retry }: { retry: () => void }) {
+export function Failed({ retry, message }: { retry: () => void; message?: string }) {
   const { t } = useT();
   return (
-    <div className="card grid place-items-center gap-4 p-10 text-center">
-      <p className="text-lg font-bold">{t.err.generic}</p>
+    <div role="alert" className="card grid place-items-center gap-4 p-10 text-center">
+      <p className="text-lg font-bold">{message ?? t.err.generic}</p>
       <button className="btn btn-primary" onClick={retry}>{t.retry}</button>
     </div>
   );
@@ -144,7 +232,7 @@ export function useToast() {
   const [msg, setMsg] = useState("");
   useEffect(() => {
     if (!msg) return;
-    const id = setTimeout(() => setMsg(""), 2400);
+    const id = setTimeout(() => setMsg(""), 2800);
     return () => clearTimeout(id);
   }, [msg]);
   return [msg, setMsg] as const;
@@ -155,7 +243,7 @@ export function PageTitle({ title, sub, children }: { title: string; sub?: strin
     <header className="rise mb-6 flex flex-wrap items-end justify-between gap-4">
       <div>
         {sub && <p className="mb-1 text-sm font-semibold text-muted">{sub}</p>}
-        <h1 className="text-4xl font-black tracking-tight md:text-5xl">{title}</h1>
+        <h1 className="text-4xl font-black md:text-5xl">{title}</h1>
       </div>
       {children}
     </header>
