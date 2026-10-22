@@ -58,3 +58,14 @@ def test_tehran_midnight_boundary(monkeypatch):
     monkeypatch.setattr(domain, "datetime", Fake)
     assert domain.today(ZoneInfo("Asia/Tehran")) == date(2026, 10, 17)
     assert domain.today(ZoneInfo("UTC")) == date(2026, 10, 16)
+
+
+def test_charity_only_mode_pays_nobody_from_anybody_elses_stake(monkeypatch):
+    monkeypatch.setattr(domain, "PAYOUT_CAP_X", 0)  # PAYOUT_CAP_X=0 in the environment
+    d, fee, charity = settle([pact(1, 50_000, 4, 0), pact(2, 10_000, 3, 3)])
+    assert d == {1: -200_000, 2: 0} and fee == 24_000 and charity == 176_000  # the winner is paid nothing; everything after the fee goes to charity
+
+
+def test_winners_who_staked_nothing_do_not_divide_by_zero():
+    d, fee, charity = settle([pact(1, 0, 3, 3), pact(2, 50_000, 3, 0)])
+    assert d[1] == 0 and sum(d.values()) + fee + charity == 0

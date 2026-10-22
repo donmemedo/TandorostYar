@@ -4,9 +4,8 @@ import Link from "next/link";
 import { useState } from "react";
 import { CountUp, Failed, Loading, Rings, Sheet, Success, TYPES, Bar, css, grad } from "@/components/ui";
 import { post, useApi, type Dash, type Pact } from "@/lib/api";
-import { useT } from "@/lib/i18n";
-
-const KCAL = [480, 550, 280, 90, 350, 300, 420, 330];
+import { parseCount } from "@/lib/digits";
+import { errText, useT } from "@/lib/i18n";
 
 export default function Today() {
   const { t, n, money, date, lang, pct } = useT();
@@ -35,15 +34,15 @@ export default function Today() {
       </header>
 
       {pacts.length === 0 ? (
-        <Link href="/pacts" className="card rise grid place-items-center gap-3 p-12 text-center" style={css({ "--i": 1 })}>
+        <Link href={data.paused ? "/wallet" : "/pacts"} className="card rise grid place-items-center gap-3 p-12 text-center" style={css({ "--i": 1 })}>
           <span className="grid h-16 w-16 place-items-center rounded-full bg-fg text-bg"><Plus size={30} /></span>
-          <p className="text-2xl font-black">{t.noPacts}</p>
-          <p className="text-muted">{t.noPactsHint}</p>
+          <p className="text-2xl font-black">{data.paused ? t.nav.pacts : t.noPacts}</p>
+          <p className="max-w-md leading-7 text-muted">{data.paused ? t.pausedMsg : t.noPactsHint}</p>
         </Link>
       ) : (
         <section className="card rise grid items-center gap-8 p-6 md:grid-cols-[auto_1fr] md:p-8" style={css({ "--i": 1 })}>
           <div className="relative mx-auto w-[240px] max-w-full">
-            <Rings items={pacts.map((p) => ({ value: p.done_days / p.target_days, c: TYPES[p.type].c }))} />
+            <Rings label={`${t.thisWeek}: ${pct(overall)}`} items={pacts.map((p) => ({ value: p.done_days / p.target_days, c: TYPES[p.type].c }))} />
             <div className="absolute inset-0 grid place-items-center text-center">
               <div>
                 <div className="text-3xl font-black tabular-nums">{pct(overall)}</div>
@@ -91,7 +90,7 @@ export default function Today() {
           const Icon = TYPES[p.type].icon, met = p.today >= p.goal;
           return (
             <article key={p.id} className="card rise flex flex-col gap-4 overflow-hidden p-5" style={css({ "--i": i + 2 })}>
-              <div aria-hidden className="absolute -end-10 -top-10 -z-10 h-32 w-32 rounded-full opacity-25 blur-2xl" style={{ background: grad(p.type) }} />
+              <div aria-hidden className="absolute -end-10 -top-10 -z-10 h-32 w-32 rounded-full opacity-25 blur-xl" style={{ background: grad(p.type) }} />
               <div className="flex items-center justify-between">
                 <span className="flex items-center gap-2 font-bold"><Icon size={18} style={{ color: TYPES[p.type].c[0] }} /> {t.today}</span>
                 {met && <span className="flex items-center gap-1 rounded-full bg-good/15 px-2.5 py-1 text-xs font-bold text-good"><Check size={14} /> {t.done}</span>}
@@ -127,22 +126,22 @@ export default function Today() {
 function CheckinSheet({ pact, onClose, onSaved }: { pact: Pact | null; onClose: () => void; onSaved: () => void }) {
   const { t, n } = useT();
   const [value, setValue] = useState(0);
-  const [food, setFood] = useState(-1);
   const [state, setState] = useState<"idle" | "busy" | "ok" | "err">("idle");
-  const close = () => { onClose(); setValue(0); setFood(-1); setState("idle"); };
+  const [msg, setMsg] = useState("");
+  const close = () => { onClose(); setValue(0); setState("idle"); setMsg(""); };
   const save = async () => {
     setState("busy");
     try {
-      await post(`/pacts/${pact!.id}/checkin`, pact!.type === "nutrition" ? { value: 1, note: t.foods[food] } : { value });
+      await post(`/pacts/${pact!.id}/checkin`, { value: pact!.type === "nutrition" ? 1 : value });
       setState("ok");
       onSaved();
       setTimeout(close, 1100);
-    } catch { setState("err"); }
+    } catch (e) { setMsg(errText(t, e)); setState("err"); }
   };
-  const ready = pact?.type === "nutrition" ? food >= 0 : value > 0;
+  const ready = pact?.type === "nutrition" || value > 0;
 
   return (
-    <Sheet open={!!pact} onClose={close}>
+    <Sheet open={!!pact} onClose={close} label={pact ? t.checkin[pact.type] : ""}>
       {pact && (state === "ok" ? <Success label={t.saved} /> : (
         <div className="space-y-5">
           <h2 className="text-2xl font-black">{t.checkin[pact.type]}</h2>
@@ -156,24 +155,20 @@ function CheckinSheet({ pact, onClose, onSaved }: { pact: Pact | null; onClose: 
           )}
           {pact.type === "steps" && (
             <>
-              <input type="number" inputMode="numeric" min={1} max={100000} placeholder={t.stepsPlaceholder} value={value || ""} autoFocus
-                onChange={(e) => setValue(Math.max(0, Math.min(100000, +e.target.value)))}
+              <input type="text" inputMode="numeric" autoComplete="off" placeholder={t.stepsPlaceholder} value={value ? n(value) : ""} autoFocus
+                onChange={(e) => setValue(parseCount(e.target.value, 40000))}
                 className="h-16 w-full rounded-2xl border border-line bg-soft px-5 text-2xl font-black tabular-nums outline-none focus:border-fg" />
               <div className="grid grid-cols-3 gap-2">
-                {[1000, 2500, 5000].map((s) => <button key={s} className="chip" onClick={() => setValue((v) => v + s)}>+{n(s)}</button>)}
+                {[1000, 2500, 5000].map((s) => <button key={s} className="chip" onClick={() => setValue((v) => Math.min(40000, v + s))}>+{n(s)}</button>)}
               </div>
             </>
           )}
           {pact.type === "nutrition" && (
-            <div className="grid grid-cols-2 gap-2">
-              {t.foods.map((f, i) => (
-                <button key={f} className="chip flex-col items-start! py-3" aria-pressed={food === i} onClick={() => setFood(i)}>
-                  <span>{f}</span><span className="text-xs font-semibold text-muted">{n(KCAL[i])} {t.kcal}</span>
-                </button>
-              ))}
-            </div>
+            <p className="rounded-2xl bg-soft p-5 text-center text-lg font-black tabular-nums">
+              {n(pact.today)} / {n(pact.goal)} {t.unit.nutrition}
+            </p>
           )}
-          {state === "err" && <p className="text-sm font-bold text-bad">{t.err.generic}</p>}
+          {state === "err" && <p role="alert" className="text-sm font-bold text-bad">{msg}</p>}
           <div className="flex gap-2">
             <button className="btn btn-ghost" onClick={close}>{t.cancel}</button>
             <button className="btn btn-primary flex-1" disabled={!ready || state === "busy"} onClick={save}>{t.save}</button>

@@ -1,0 +1,14 @@
+{
+  "name": "fitpeyman-e2e",
+  "private": true,
+  "type": "module",
+  "description": "Headless-Chrome end-to-end and axe accessibility checks. Dev tooling only: kept out of the app's dependencies.",
+  "scripts": {
+    "e2e": "node run.mjs",
+    "a11y": "node a11y.mjs"
+  },
+  "devDependencies": {
+    "axe-core": "^4.10.0",
+    "puppeteer-core": "^24.0.0"
+  }
+}

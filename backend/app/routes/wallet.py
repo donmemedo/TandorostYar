@@ -1,4 +1,4 @@
-"""Wallet, rewards and the demo-only top-up."""
+"""Wallet, the (not yet redeemable) rewards list, and the demo-only top-up."""
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
@@ -9,7 +9,8 @@ from ..deps import Cfg, User
 from ..domain import today
 
 router = APIRouter(prefix="/api")
-REWARDS = [{"id": "gym20", "cost": 300}, {"id": "coach", "cost": 500}, {"id": "bottle", "cost": 200}, {"id": "charity", "cost": 100}]
+REWARDS = [  # shown as "coming soon": there is deliberately no redeem endpoint until a partner can actually deliver
+    {"id": "gym20", "cost": 300}, {"id": "coach", "cost": 500}, {"id": "bottle", "cost": 200}, {"id": "charity", "cost": 100}]
 
 
 def wallet_view(con, uid, st: Settings):
@@ -32,16 +33,4 @@ def topup(u: dict = User, st: Settings = Cfg):
     with db(st.db_path, write=True) as con:
         con.execute("UPDATE users SET balance=balance+500000 WHERE id=?", (u["id"],))
         con.execute("INSERT INTO txns(user_id,amount,kind,day) VALUES(?,?,?,?)", (u["id"], 500_000, "topup", today(st.zone).isoformat()))
-        return wallet_view(con, u["id"], st)
-
-
-@router.post("/rewards/{rid}/redeem")
-def redeem(rid: str, u: dict = User, st: Settings = Cfg):
-    r = next((r for r in REWARDS if r["id"] == rid), None)
-    if not r:
-        raise HTTPException(404, "not_found")
-    with db(st.db_path, write=True) as con:
-        if con.execute("UPDATE users SET points=points-? WHERE id=? AND points>=?", (r["cost"], u["id"], r["cost"])).rowcount == 0:
-            raise HTTPException(400, "points")
-        con.execute("INSERT INTO redemptions(user_id,reward,cost,day) VALUES(?,?,?,?)", (u["id"], rid, r["cost"], today(st.zone).isoformat()))
         return wallet_view(con, u["id"], st)

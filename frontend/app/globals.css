@@ -16,18 +16,20 @@
 :root {
   --bg: #f5f5f7;
   --fg: #1d1d1f;
-  --muted: #6e6e73;
-  --line: rgb(0 0 0 / 0.07);
-  --soft: rgb(0 0 0 / 0.045);
-  --card: rgb(255 255 255 / 0.66);
-  --card-hi: rgb(255 255 255 / 0.9);
+  --muted: #5f5f66; /* 5.9:1 on --bg, 5.3:1 on --card over the aurora */
+  --line: rgb(0 0 0 / 0.08);
+  --soft: rgb(0 0 0 / 0.05);
+  --card: rgb(255 255 255 / 0.8);
+  --card-solid: #fff;
+  --card-hi: rgb(255 255 255 / 0.95);
+  --glass: rgb(255 255 255 / 0.7);
   --shadow: 0 1px 1px rgb(0 0 0 / 0.03), 0 12px 40px -12px rgb(0 0 0 / 0.12);
   --spot: rgb(255 255 255 / 0.9);
   --accent: #0071e3;
-  --good: #1f9d4c;
-  --bad: #e5304f;
-  --aurora: 0.32;
-  --glow: 0;
+  --good: #1a7f3c;
+  --bad: #d70f3b;
+  --bad-ink: #a80c2d; /* text on a --bad tint: 5.9:1 */
+  --aurora: 0.3;
   --brand: linear-gradient(135deg, #ff2d55, #ff9f0a 35%, #a6e22e 65%, #32ade6);
   color-scheme: light;
 }
@@ -35,18 +37,20 @@
 [data-theme="dark"] {
   --bg: #000;
   --fg: #f5f5f7;
-  --muted: #8e8e93;
-  --line: rgb(255 255 255 / 0.09);
-  --soft: rgb(255 255 255 / 0.06);
-  --card: rgb(28 28 30 / 0.55);
-  --card-hi: rgb(44 44 46 / 0.75);
-  --shadow: 0 0 0 1px rgb(255 255 255 / 0.02), 0 20px 50px -20px rgb(0 0 0 / 0.8);
+  --muted: #a1a1a8;
+  --line: rgb(255 255 255 / 0.1);
+  --soft: rgb(255 255 255 / 0.07);
+  --card: rgb(28 28 30 / 0.78);
+  --card-solid: #1c1c1e;
+  --card-hi: rgb(44 44 46 / 0.9);
+  --glass: rgb(28 28 30 / 0.65);
+  --shadow: 0 0 0 1px rgb(255 255 255 / 0.03), 0 20px 50px -20px rgb(0 0 0 / 0.8);
   --spot: rgb(255 255 255 / 0.07);
   --accent: #2997ff;
   --good: #30d158;
-  --bad: #ff375f;
-  --aurora: 0.42;
-  --glow: 1;
+  --bad: #ff4d6d;
+  --bad-ink: #ff4d6d;
+  --aurora: 0.45;
   color-scheme: dark;
 }
 
@@ -56,83 +60,104 @@ html {
   color: var(--fg);
   -webkit-font-smoothing: antialiased;
   -webkit-tap-highlight-color: transparent;
+  text-size-adjust: 100%;
 }
 html[lang="fa"] { font-family: "Vazirmatn Variable", system-ui, sans-serif; }
+/* Tracking is size- and script-specific: tight on large Latin display text, never on Arabic script (it breaks letter joining). */
+html[lang="fa"] * { letter-spacing: 0 !important; }
+html[lang="en"] :is(h1, .display) { letter-spacing: -0.03em; }
+html[lang="en"] :is(h2, h3) { letter-spacing: -0.015em; }
 body { min-height: 100dvh; overflow-x: hidden; }
 ::selection { background: color-mix(in oklab, var(--accent) 30%, transparent); }
 
-/* Living background */
-.aurora { position: fixed; inset: -25%; z-index: -1; pointer-events: none; opacity: var(--aurora); filter: blur(100px) saturate(150%); }
-.aurora i { position: absolute; width: 48vmax; height: 48vmax; border-radius: 50%; animation: drift 26s ease-in-out infinite alternate; }
-.aurora i:nth-child(1) { background: #ff2d55; top: 5%; left: 5%; }
-.aurora i:nth-child(2) { background: #30d158; top: 35%; right: 0; animation-duration: 32s; animation-direction: alternate-reverse; }
-.aurora i:nth-child(3) { background: #0a84ff; bottom: 0; left: 30%; animation-duration: 38s; }
-@keyframes drift { to { transform: translate(12vmax, -8vmax) scale(1.25) rotate(60deg); } }
+/* Living background: three soft gradients painted once on one fixed layer; only a compositor transform animates. */
+.aurora {
+  position: fixed; inset: -10%; z-index: -1; pointer-events: none; opacity: var(--aurora);
+  background:
+    radial-gradient(38vmax 38vmax at 14% 10%, #ff2d55, transparent 70%),
+    radial-gradient(44vmax 44vmax at 90% 42%, #30d158, transparent 70%),
+    radial-gradient(48vmax 48vmax at 42% 100%, #0a84ff, transparent 70%);
+  animation: drift 48s ease-in-out infinite alternate; will-change: transform;
+}
+@keyframes drift { to { transform: translate3d(-4%, 3%, 0) scale(1.08); } }
 
 @layer components {
-/* Glass */
-.glass { background: var(--card); backdrop-filter: blur(28px) saturate(180%); -webkit-backdrop-filter: blur(28px) saturate(180%); border: 1px solid var(--line); }
-.card { position: relative; border-radius: 28px; background: var(--card); backdrop-filter: blur(28px) saturate(180%); -webkit-backdrop-filter: blur(28px) saturate(180%); border: 1px solid var(--line); box-shadow: var(--shadow); isolation: isolate; }
-@media (hover: hover) {
+/* Materials: translucent blur is reserved for floating chrome (sidebar, header, tab bar, sheets). Cards stay cheap. */
+.glass { background: var(--glass); backdrop-filter: blur(22px) saturate(170%); -webkit-backdrop-filter: blur(22px) saturate(170%); border: 1px solid var(--line); }
+.card { position: relative; border-radius: 28px; background: var(--card); border: 1px solid var(--line); box-shadow: var(--shadow); isolation: isolate; }
+@media (hover: hover) and (pointer: fine) {
   .card::before { content: ""; position: absolute; inset: 0; z-index: -1; border-radius: inherit; pointer-events: none; opacity: 0; transition: opacity 0.4s;
     background: radial-gradient(420px circle at var(--x, 50%) var(--y, 50%), var(--spot), transparent 45%); }
   .card:hover::before { opacity: 1; }
 }
 
 .brand-text { background: var(--brand); -webkit-background-clip: text; background-clip: text; color: transparent; }
-.mark { width: 34px; height: 34px; border-radius: 50%; background: conic-gradient(#ff2d55, #ff9f0a, #a6e22e, #32ade6, #5e5ce6, #ff2d55); -webkit-mask: radial-gradient(circle, transparent 38%, #000 40%); mask: radial-gradient(circle, transparent 38%, #000 40%); animation: spin 8s linear infinite; }
-@keyframes spin { to { transform: rotate(1turn); } }
+.mark { width: 34px; height: 34px; border-radius: 50%; background: conic-gradient(#ff2d55, #ff9f0a, #a6e22e, #32ade6, #5e5ce6, #ff2d55); -webkit-mask: radial-gradient(circle, transparent 38%, #000 40%); mask: radial-gradient(circle, transparent 38%, #000 40%); animation: spin 1.2s cubic-bezier(0.2, 0.8, 0.2, 1) 1; }
+a:hover > .mark { animation: spin 1.2s cubic-bezier(0.2, 0.8, 0.2, 1) 1; }
+@keyframes spin { from { transform: rotate(-200deg); } }
 
-/* Buttons */
-.btn { display: inline-flex; align-items: center; justify-content: center; gap: 0.5rem; height: 48px; padding-inline: 1.25rem; border-radius: 999px; font-weight: 700; transition: transform 0.25s cubic-bezier(0.2, 0.8, 0.2, 1), background 0.2s, opacity 0.2s; user-select: none; }
-.btn:active { transform: scale(0.96); }
+/* Buttons: feedback starts on pointer-down, not on release. */
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 0.5rem; height: 48px; padding-inline: 1.25rem; border-radius: 999px; font-weight: 700; transition: transform 0.18s cubic-bezier(0.2, 0.8, 0.2, 1), background 0.2s, opacity 0.2s; user-select: none; touch-action: manipulation; }
+.btn:active { transform: scale(0.96); transition-duration: 0.08s; }
 .btn:disabled { opacity: 0.4; pointer-events: none; }
 .btn-primary { background: var(--fg); color: var(--bg); }
 .btn-ghost { background: var(--soft); }
 .btn-ghost:hover { background: var(--line); }
-.chip { display: inline-flex; align-items: center; justify-content: center; gap: 0.35rem; min-height: 44px; padding-inline: 1rem; border-radius: 16px; background: var(--soft); border: 1.5px solid transparent; font-weight: 600; transition: all 0.25s cubic-bezier(0.2, 0.8, 0.2, 1); }
-.chip:active { transform: scale(0.95); }
+.btn-danger { background: color-mix(in oklab, var(--bad) 14%, transparent); color: var(--bad-ink); }
+.chip { display: inline-flex; align-items: center; justify-content: center; gap: 0.35rem; min-height: 44px; padding-inline: 1rem; border-radius: 16px; background: var(--soft); border: 1.5px solid transparent; font-weight: 600; transition: transform 0.18s cubic-bezier(0.2, 0.8, 0.2, 1), background 0.2s, border-color 0.2s; touch-action: manipulation; }
+.chip:active { transform: scale(0.95); transition-duration: 0.08s; }
 .chip[aria-pressed="true"] { background: var(--card-hi); border-color: var(--fg); box-shadow: var(--shadow); }
-.icon-btn { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 50%; background: var(--soft); transition: transform 0.2s, background 0.2s; }
+.chip:disabled { opacity: 0.4; pointer-events: none; }
+.icon-btn { display: grid; place-items: center; width: 44px; height: 44px; border-radius: 50%; background: var(--soft); transition: transform 0.15s, background 0.2s; touch-action: manipulation; }
 .icon-btn:hover { background: var(--line); }
-.icon-btn:active { transform: scale(0.9); }
+.icon-btn:active { transform: scale(0.9); transition-duration: 0.06s; }
+.field { height: 56px; width: 100%; border-radius: 18px; border: 1.5px solid var(--line); background: var(--soft); padding-inline: 1.1rem; font-size: 1.125rem; font-weight: 700; outline: none; transition: border-color 0.2s, background 0.2s; }
+.field:focus { border-color: var(--fg); background: var(--card-hi); }
+.field[aria-invalid="true"] { border-color: var(--bad); }
 }
 :focus-visible { outline: 2.5px solid var(--accent); outline-offset: 2px; border-radius: 12px; }
+.skip { position: absolute; inset-inline-start: 1rem; top: -4rem; z-index: 100; padding: 0.75rem 1.25rem; border-radius: 999px; background: var(--fg); color: var(--bg); font-weight: 700; }
+.skip:focus { top: 1rem; }
 
-/* Rings */
+/* Rings and bars */
 .ring-arc { transition: stroke-dashoffset 1.2s cubic-bezier(0.2, 0.8, 0.2, 1); animation: ring-draw 1.6s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
 @keyframes ring-draw { from { stroke-dashoffset: var(--c); } }
-
 .bar { height: 8px; border-radius: 99px; background: var(--soft); overflow: hidden; }
 .bar > i { display: block; height: 100%; border-radius: inherit; transition: width 1.2s cubic-bezier(0.2, 0.8, 0.2, 1); animation: grow 1.4s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
 @keyframes grow { from { width: 0; } }
 
-/* Motion */
-.rise { animation: rise 0.8s cubic-bezier(0.2, 0.8, 0.2, 1) both; animation-delay: calc(var(--i, 0) * 70ms); }
-@keyframes rise { from { opacity: 0; transform: translateY(18px) scale(0.985); filter: blur(8px); } }
+/* Motion: opacity and transform only, with a capped stagger so row 30 never waits two seconds. */
+.rise { animation: rise 0.6s cubic-bezier(0.2, 0.8, 0.2, 1) both; animation-delay: calc(min(var(--i, 0), 8) * 60ms); }
+@keyframes rise { from { opacity: 0; transform: translateY(14px) scale(0.99); } }
 .skeleton { border-radius: 28px; background: linear-gradient(90deg, var(--soft) 30%, var(--line) 50%, var(--soft) 70%) 0 0 / 300% 100%; animation: shimmer 1.4s linear infinite; }
 @keyframes shimmer { to { background-position: -150% 0; } }
 .flame { animation: flicker 1.8s ease-in-out infinite; transform-origin: 50% 90%; }
 @keyframes flicker { 50% { transform: scale(1.12) rotate(-4deg); } }
+@keyframes grow-y { from { transform: scaleY(0); } }
 
-/* Sheet (native <dialog>) */
+/* Sheet (native <dialog>): the drag, dismiss and spring-back are driven from JS (see Sheet in ui.tsx). */
 dialog.sheet { margin: auto auto 0; width: 100%; max-width: 560px; max-height: 92dvh; padding: 0; border: 0; border-radius: 32px 32px 0 0; background: transparent; color: var(--fg); overflow: visible; }
 dialog.sheet[open] { animation: sheet-up 0.5s cubic-bezier(0.2, 0.9, 0.2, 1); }
-dialog.sheet::backdrop { background: rgb(0 0 0 / 0.35); backdrop-filter: blur(6px); animation: fade 0.3s; }
-.sheet-body { background: var(--bg); border: 1px solid var(--line); border-radius: inherit; padding: 12px 20px calc(24px + env(safe-area-inset-bottom)); max-height: 92dvh; overflow-y: auto; box-shadow: 0 -20px 60px -20px rgb(0 0 0 / 0.4); }
+dialog.sheet::backdrop { background: rgb(0 0 0 / calc(0.38 * var(--dim, 1))); animation: fade 0.3s; }
+.sheet-body { background: var(--bg); border: 1px solid var(--line); border-radius: inherit; padding: 8px 20px calc(24px + env(safe-area-inset-bottom)); max-height: 92dvh; overflow-y: auto; overscroll-behavior: contain; box-shadow: 0 -20px 60px -20px rgb(0 0 0 / 0.4); will-change: transform; }
+.sheet-grab { display: block; width: 100%; padding: 17px 0 21px; touch-action: none; cursor: grab; }
+.sheet-grab::before { content: ""; display: block; margin: 0 auto; width: 40px; height: 6px; border-radius: 99px; background: var(--line); }
 @media (min-width: 768px) {
   dialog.sheet { margin: auto; border-radius: 32px; }
   dialog.sheet[open] { animation: pop 0.45s cubic-bezier(0.2, 0.9, 0.2, 1); }
   .sheet-body { padding: 24px 28px 28px; }
+  .sheet-grab { display: none; }
 }
 @keyframes sheet-up { from { transform: translateY(100%); } }
-@keyframes pop { from { transform: scale(0.92); opacity: 0; } }
+@keyframes pop { from { transform: scale(0.94); opacity: 0; } }
 @keyframes fade { from { opacity: 0; } }
 
 /* Hold-to-seal */
 .hold { position: relative; overflow: hidden; touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+.hold[data-on] .hold-label { color: #fff; }
 .hold-fill { position: absolute; inset: 0; background: var(--brand); transform: scaleX(var(--p)); transform-origin: left; }
-[dir="rtl"] .hold-fill { transform-origin: right; }
+[dir="rtl"] .hold[data-on] .hold-label { color: #fff; }
+.hold-fill { transform-origin: right; }
 
 /* Success burst */
 .burst { position: relative; width: 120px; height: 120px; display: grid; place-items: center; }
@@ -144,6 +169,19 @@ dialog.sheet::backdrop { background: rgb(0 0 0 / 0.35); backdrop-filter: blur(6p
 /* Theme reveal: the circle animation is driven from JS */
 html.vt-theme::view-transition-old(root), html.vt-theme::view-transition-new(root) { animation: none; mix-blend-mode: normal; }
 
+/* Accessibility preferences: three independent signals. */
 @media (prefers-reduced-motion: reduce) {
-  *, ::before, ::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+  *, ::before, ::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
+  .aurora { animation: none; }
+}
+@media (prefers-reduced-transparency: reduce) {
+  .glass, .card { background: var(--card-solid); backdrop-filter: none; -webkit-backdrop-filter: none; }
+  .aurora { display: none; }
+  dialog.sheet::backdrop { backdrop-filter: none; }
+}
+@media (prefers-contrast: more) {
+  :root { --muted: #3a3a3f; --line: rgb(0 0 0 / 0.35); --card: #fff; --glass: #fff; }
+  [data-theme="dark"] { --muted: #d1d1d6; --line: rgb(255 255 255 / 0.4); --card: #1c1c1e; --glass: #1c1c1e; }
+  .aurora { display: none; }
+  .card, .glass, .chip { border-width: 1.5px; }
 }

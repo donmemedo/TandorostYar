@@ -22,13 +22,16 @@ class Limiter:
     still fills it with live keys, NEW keys are refused (fail closed) instead of wiping everyone's counters.
     ponytail: single-process memory; move to Redis if you ever run more than one worker."""
 
+    FULL = 10**9  # returned by bump() when the table is full of live keys
+
     def __init__(self, cap: int = 100_000, clock=time.time):
         self._clock = clock
         self._h: dict[tuple, list] = {}
         self._lock = threading.Lock()
         self._cap = cap
 
-    def hit(self, key, n: int, per: int) -> bool:
+    def bump(self, key, per: int) -> int:
+        """Count one hit for `key` in the current window and return the new count."""
         now = self._clock()
         win, k = int(now // per), (key, per)
         with self._lock:
@@ -37,16 +40,37 @@ class Limiter:
                 if len(self._h) >= self._cap:
                     self._h = {kk: v for kk, v in self._h.items() if (v[0] + 1) * kk[1] > now}
                     if len(self._h) >= self._cap:
-                        return False
+                        return self.FULL
                 e = self._h[k] = [win, 0]
             elif e[0] != win:
                 e[0], e[1] = win, 0
             e[1] += 1
-            return e[1] <= n
+            return e[1]
+
+    def hit(self, key, n: int, per: int) -> bool:
+        return self.bump(key, per) <= n
+
+    def refund(self, key, per: int):
+        """Give back one hit (used when the thing the hit paid for never happened, e.g. the SMS was not sent)."""
+        with self._lock:
+            e = self._h.get((key, per))
+            if e and e[0] == int(self._clock() // per) and e[1] > 0:
+                e[1] -= 1
 
     def check(self, key, n: int, per: int):
-        if not self.hit(key, n, per):
+        c = self.bump(key, per)
+        if c > n:
+            if c in (n + 1, self.FULL):  # log the first rejection per window only: a flood must not flood the logs
+                obs.event("rate_limited", 30, scope=key[0] if isinstance(key, tuple) else key)  # scope only: never the phone number
             raise HTTPException(429, "rate_limited", headers={"Retry-After": str(per)})
+
+
+def _net(a: str):
+    """One key per client: IPv4-mapped IPv6 collapses to IPv4, and a whole IPv6 /64 (one subscriber, 2^64 addresses) counts as one."""
+    ip = ipaddress.ip_address(a)
+    if ip.version == 6 and ip.ipv4_mapped:
+        return str(ip.ipv4_mapped)
+    return str(ipaddress.ip_network(f"{ip}/64", strict=False).network_address) + "/64" if ip.version == 6 else str(ip)
 
 
 def peer_ip(scope: dict, hops: int) -> str:
@@ -59,10 +83,13 @@ def peer_ip(scope: dict, hops: int) -> str:
                 parts = [p.strip() for p in v.decode("latin-1").split(",")]
                 if len(parts) >= hops:
                     try:
-                        return str(ipaddress.ip_address(parts[-hops]))
+                        return _net(parts[-hops])
                     except ValueError:
                         pass
-    return peer
+    try:
+        return _net(peer)
+    except ValueError:
+        return peer
 
 
 def _json(status: int, detail: str, extra: list | None = None) -> tuple[list, bytes]:
@@ -108,17 +135,18 @@ class Guards:
             await send(msg)
 
         if api:
-            if int(h.get(b"content-length") or 0) > MAX_BODY:
-                obs.event("body_too_large", 30, ip=ip)
-                return await respond(413, "too_large")
-            if method not in SAFE:
-                why = self._csrf(h)
-                if why:
-                    obs.event("csrf_blocked", 30, ip=ip, why=why, path=scope["path"])
-                    return await respond(403, "csrf")
-            if not self.limiter.hit(("ip", ip), self.st.rate_per_min, 60):
-                obs.event("rate_limited", 30, ip=ip, scope="global")
+            # The limiter runs FIRST so that rejected requests spend budget too (a stream of cheap 403s/413s cannot be free).
+            c = self.limiter.bump(("ip", ip), 60)
+            if c > self.st.rate_per_min:
+                if c in (self.st.rate_per_min + 1, self.limiter.FULL):
+                    obs.event("rate_limited", 30, ip=ip, scope="global")
                 return await respond(429, "rate_limited", [(b"retry-after", b"60")])
+            if int(h.get(b"content-length") or 0) > MAX_BODY:
+                self._note("body_too_large", ip, scope["path"])
+                return await respond(413, "too_large")
+            if method not in SAFE and (why := self._csrf(h)):
+                self._note("csrf_blocked", ip, scope["path"], why=why)
+                return await respond(403, "csrf")
 
         got = 0
 
@@ -136,6 +164,12 @@ class Guards:
         finally:
             if api and scope["path"] != "/api/health":
                 obs.event("request", method=scope["method"], path=scope["path"], status=status, ms=round((time.perf_counter() - t0) * 1000, 1), ip=ip)
+
+    def _note(self, name: str, ip: str, path: str, **ctx):
+        """Log a guard rejection at most 5 times per IP per minute and never more than 200 characters of path, so an attacker cannot
+        use rejected requests to scroll the evidence of a real attack out of the (rotated, local) logs."""
+        if self.limiter.hit(("log", name, ip), 5, 60):
+            obs.event(name, 30, ip=ip, path=path[:200], **ctx)
 
     @staticmethod
     def _csrf(h: dict) -> str | None:

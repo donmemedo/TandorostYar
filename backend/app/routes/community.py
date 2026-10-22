@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hmac
+import json
 import logging
 from datetime import timedelta
 
@@ -11,7 +12,7 @@ from .. import obs
 from ..config import Settings
 from ..db import db
 from ..deps import Cfg, User
-from ..domain import invalidate, pool_view, settle_due, settle_week, snapshot, today, week_start
+from ..domain import daily_checkins, pool_view, settle_due, settle_week, snapshot, today, week_start
 from ..security import client_ip
 
 router = APIRouter(prefix="/api")
@@ -25,7 +26,7 @@ def community(u: dict = User, st: Settings = Cfg):
     with db(st.db_path) as con:
         pacts = snapshot(con, st.db_path, start, tod)
         ids = sorted({p["user_id"] for p in pacts})
-        users = {r["id"]: dict(r) for r in con.execute("SELECT id, name, name_en FROM users WHERE id IN (SELECT user_id FROM pacts WHERE active=1)")}
+        users = {r["id"]: dict(r) for r in con.execute("SELECT id, name, name_en FROM users WHERE id IN (SELECT value FROM json_each(?))", (json.dumps(ids),))}  # the snapshot's users, even if a settlement just paused them
         last = con.execute("SELECT * FROM settlements ORDER BY week DESC LIMIT 1").fetchone()
     board: dict = {}
     for p in pacts:
@@ -60,6 +61,7 @@ def admin_settle(req: Request, st: Settings = Cfg):
         obs.event("admin_denied", logging.WARNING, ip=client_ip(req))
         raise HTTPException(404, "not_found")
     with db(st.db_path, write=True) as con:
+        con.execute("DELETE FROM meta WHERE k='held'")  # an operator decision releases a settlement hold (see main.sweep)
         settle_due(con, today(st.zone))
     obs.event("admin_settle", ip=client_ip(req))
     with db(st.db_path) as con:
@@ -74,7 +76,7 @@ def business(st: Settings = Cfg):
     since = tod - timedelta(13)
     with db(st.db_path) as con:
         pacts = snapshot(con, st.db_path, start, tod)
-        daily = dict(con.execute("SELECT day, COUNT(*) FROM checkins WHERE day>=? GROUP BY day", (since.isoformat(),)).fetchall())
+        daily = daily_checkins(con, st.db_path, since)
     by_type: dict = {}
     for p in pacts:
         t = by_type.setdefault(p["type"], [0, 0])

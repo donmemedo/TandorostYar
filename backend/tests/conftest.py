@@ -1,9 +1,11 @@
 import os
 import tempfile
+from datetime import datetime, timezone
 
 import pytest
 from fastapi.testclient import TestClient
 
+from app import domain
 from app.config import Settings
 from app.main import create_app
 
@@ -40,3 +42,18 @@ def login(c, phone="09120000001"):
     r = c.post("/api/auth/verify", json={"phone": phone, "code": code})
     assert r.status_code == 200, r.text
     return r
+
+
+@pytest.fixture(autouse=True)
+def fake_today(monkeypatch):
+    """FAKE_TODAY=2026-10-17 pytest ... pins the clock to noon Tehran-time of that day, so the week-position logic
+    (days left, early close, cancellation) can be exercised on every weekday."""
+    if d := os.getenv("FAKE_TODAY"):
+        y, m, day = map(int, d.split("-"))
+
+        class Fake(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime(y, m, day, 12, 0, tzinfo=tz or timezone.utc)
+
+        monkeypatch.setattr(domain, "datetime", Fake)

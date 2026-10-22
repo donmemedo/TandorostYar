@@ -1,13 +1,26 @@
 """Environment-driven settings. Every security-relevant default is the safe one."""
 from __future__ import annotations
 
+import ipaddress
 import os
 from dataclasses import dataclass
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 
 def _on(name: str, default: bool = False) -> bool:
     return os.getenv(name, "1" if default else "0") == "1"
+
+
+def _private_host(host: str) -> bool:
+    """True for loopback, private ranges and single-label names such as a compose service (`sms-gw`)."""
+    if host == "localhost" or "." not in host:
+        return True
+    try:
+        a = ipaddress.ip_address(host)
+        return a.is_private or a.is_loopback
+    except ValueError:
+        return False
 
 
 @dataclass(frozen=True)
@@ -29,6 +42,10 @@ class Settings:
         url = os.getenv("SMS_WEBHOOK_URL") or None
         if url and not url.startswith(("https://", "http://")):
             raise ValueError("SMS_WEBHOOK_URL must be an http(s) URL")
+        if url and url.startswith("http://") and not demo and not _private_host(urlparse(url).hostname or ""):
+            raise ValueError("SMS_WEBHOOK_URL over plain http is only allowed to a loopback/private/internal host: OTP codes would cross the internet in clear text")
+        if (key := os.getenv("LOG_KEY")) and len(key) < 32:
+            raise ValueError("LOG_KEY must be at least 32 characters")
         token = os.getenv("ADMIN_TOKEN") or None
         if token and len(token) < 32:
             raise ValueError("ADMIN_TOKEN must be at least 32 characters")

@@ -1,0 +1,6 @@
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Documented demo phone numbers and the fixed test admin token are not secrets (exact patterns only; no directory is exempt)"
+regexes = ['''0912000000\d''', '''a{40}''']

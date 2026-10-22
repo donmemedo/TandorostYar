@@ -12,9 +12,16 @@ from app.security import Limiter
 from .conftest import build, login
 
 JSON = {"content-type": "application/json"}
+def assert_ledger(path):
+    """The invariant the sweeper alarms on: every balance equals the sum of its ledger rows, and nothing is negative."""
+    with sqlite3.connect(path) as con:
+        bad = con.execute("SELECT u.id FROM users u WHERE u.balance != COALESCE((SELECT SUM(amount) FROM txns WHERE user_id=u.id),0) OR u.balance<0").fetchall()
+    assert bad == [], f"ledger mismatch for users {bad}"
+
+
 USER_ENDPOINTS = [("get", "/api/me"), ("get", "/api/dashboard"), ("get", "/api/wallet"), ("get", "/api/community"),
                   ("post", "/api/pacts"), ("post", "/api/pacts/1/checkin"), ("post", "/api/wallet/topup"),
-                  ("post", "/api/rewards/gym20/redeem"), ("post", "/api/settle"), ("delete", "/api/pacts/1"), ("patch", "/api/me"), ("delete", "/api/me")]
+                  ("post", "/api/settle"), ("delete", "/api/pacts/1"), ("patch", "/api/me"), ("delete", "/api/me")]
 
 
 @pytest.mark.parametrize("method,path", USER_ENDPOINTS)
@@ -214,16 +221,19 @@ def test_create_pact_rules(demo):
 
 def test_concurrent_creates_cannot_spend_the_same_money_twice(demo):
     new_user(demo)  # balance 500k, three pacts of 250k each cannot all fit
-    out, jar = [], dict(demo.cookies)
+    jar = dict(demo.cookies)
+    clients = [TestClient(demo.app, base_url="http://testserver", cookies=jar) for _ in range(3)]  # built BEFORE the threads, no lifespan each
+    barrier, out = threading.Barrier(3), []
 
-    def go(kind):
-        with TestClient(demo.app, base_url="http://testserver", cookies=jar) as c:
-            out.append(c.post("/api/pacts", json={"type": kind, "target_days": 1, "stake": 250_000}).status_code)
+    def go(c, kind):
+        barrier.wait()  # all three requests are released together, so they genuinely contend for the write lock
+        out.append(c.post("/api/pacts", json={"type": kind, "target_days": 1, "stake": 250_000}).status_code)
 
-    ts = [threading.Thread(target=go, args=(k,)) for k in ("gym", "steps", "nutrition")]
+    ts = [threading.Thread(target=go, args=(c, k)) for c, k in zip(clients, ("gym", "steps", "nutrition"))]
     [t.start() for t in ts]
     [t.join() for t in ts]
     assert sorted(out) == [200, 200, 400]
+    assert_ledger(demo.st.db_path)
 
 
 def test_checkin_caps_and_goal_points(demo):
@@ -249,6 +259,7 @@ def test_demo_settlement_is_idempotent_conserves_money_and_freezes_the_week(demo
         assert con.execute("SELECT MIN(balance) FROM users").fetchone()[0] >= 0
     assert before - after == s["fee"] + s["charity"]
     assert demo.post("/api/settle", json={}).json() == {"detail": "settled"}
+    assert_ledger(demo.st.db_path)
     pid = demo.get("/api/dashboard").json()["pacts"]
     if pid:
         assert demo.post(f"/api/pacts/{pid[0]['id']}/checkin", json={"value": 40}).json() == {"detail": "settled"}
@@ -262,6 +273,7 @@ def test_cancelled_pact_still_pays_this_weeks_penalty_and_blocks_deletion(demo):
     demo.post("/api/settle", json={})
     me = demo.get("/api/me").json()
     assert me["balance"] == 400_000  # 500k - the missed day
+    assert_ledger(demo.st.db_path)
     assert demo.get("/api/dashboard").json()["pacts"] == []  # ended with the week
 
 
@@ -280,7 +292,8 @@ def test_mvp_database_migrates_without_crashing_or_back_charging(tmp_path):
     with sqlite3.connect(path) as con:
         assert con.execute("SELECT balance FROM users").fetchone()[0] == 1_000_000  # no retroactive penalty
         assert con.execute("SELECT COUNT(*) FROM settlements").fetchone()[0] == 0
-        assert con.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert con.execute("SELECT daily_goal FROM pacts WHERE id=1").fetchone()[0] == 30  # the MVP pact got its goal copied on
         with pytest.raises(sqlite3.IntegrityError):
             con.execute("INSERT INTO users(name,name_en,phone) VALUES('x','x','0912')")
             con.execute("INSERT INTO users(name,name_en,phone) VALUES('y','y','0912')")
@@ -295,3 +308,367 @@ def test_leaderboard_never_exposes_phone_numbers(demo):
 def test_business_page_is_public_and_aggregate_only(demo):
     r = demo.get("/api/business")
     assert r.status_code == 200 and set(r.json()) == {"members", "pacts", "completion", "daily"}
+
+
+def test_supported_entrypoint_never_lets_uvicorn_rewrite_the_client_ip():
+    # Found live: with uvicorn's default proxy_headers a client beside a local proxy picked its own IP and defeated every limit.
+    import pathlib
+    src = (pathlib.Path(__file__).parent.parent / "app" / "__main__.py").read_text()
+    assert "proxy_headers=False" in src
+    assert "--no-proxy-headers" in (pathlib.Path(__file__).parent.parent / "README.md").read_text() if (pathlib.Path(__file__).parent.parent / "README.md").exists() else True
+
+
+def test_a_user_who_cannot_cover_next_week_is_paused_and_told(demo):
+    login(demo, "09120000003")  # seeded user with pacts
+    with sqlite3.connect(demo.st.db_path) as con:
+        con.execute("UPDATE users SET balance=1 WHERE phone='09120000003'")  # cannot cover any exposure
+    demo.post("/api/settle", json={})
+    d = demo.get("/api/dashboard").json()
+    assert d["pacts"] == [] and d["paused"] is True
+    assert demo.get("/api/wallet").json()["txns"][0]["kind"] == "paused"
+
+
+def test_account_deletion_with_a_balance_is_refused_outside_demo(prod, monkeypatch):
+    from app.routes import auth
+    monkeypatch.setattr(auth, "send_sms", lambda st, phone, code: codes.append(code))
+    codes: list = []
+    prod.post("/api/auth/otp", json={"phone": "09125551234"})
+    prod.post("/api/auth/verify", json={"phone": "09125551234", "code": codes[0]})
+    with sqlite3.connect(prod.st.db_path) as con:
+        con.execute("UPDATE users SET balance=1000 WHERE phone='09125551234'")
+    assert prod.request("DELETE", "/api/me", json={}).json() == {"detail": "has_balance"}
+
+
+# ---- production settlement path (the sweeper), exercised directly -------------------------------------------------------------
+def _mk(path, tod):
+    """A database at epoch = two weeks ago with: user 1 (complete pact in W-2), user 2 (pact created in W-1, misses), user 3 (cancelled)."""
+    from datetime import timedelta
+
+    from app.domain import week_start
+    w0 = week_start(tod)
+    with sqlite3.connect(path) as con:
+        con.row_factory = sqlite3.Row
+        con.execute("UPDATE meta SET v=? WHERE k='epoch'", ((w0 - timedelta(14)).isoformat(),))
+        for uid in (1, 2, 3):
+            con.execute("INSERT INTO users(id,name,name_en,balance,phone) VALUES(?,?,?,?,?)", (uid, "u", "u", 1_000_000, f"0912888000{uid}"))
+            con.execute("INSERT INTO txns(user_id,amount,kind,day) VALUES(?,?,?,?)", (uid, 1_000_000, "topup", (w0 - timedelta(30)).isoformat()))
+        con.execute("INSERT INTO pacts(id,user_id,type,target_days,stake,daily_goal,created) VALUES(1,1,'gym',1,100000,30,?)", ((w0 - timedelta(14)).isoformat(),))
+        con.execute("INSERT INTO checkins(pact_id,day,value) VALUES(1,?,45)", ((w0 - timedelta(13)).isoformat(),))  # W-2: done
+        con.execute("INSERT INTO pacts(id,user_id,type,target_days,stake,daily_goal,created) VALUES(2,2,'gym',2,100000,30,?)", ((w0 - timedelta(7)).isoformat(),))  # created in W-1: no W-2 charge
+        con.execute("INSERT INTO pacts(id,user_id,type,target_days,stake,created,ends) VALUES(3,3,'steps',1,50000,?,?)", ((w0 - timedelta(14)).isoformat(), (w0 - timedelta(8)).isoformat()))
+    return w0
+
+
+def test_the_sweeper_catches_up_several_weeks_idempotently_and_conserves_money(tmp_path):
+    import time
+    from datetime import timedelta
+
+    from app.db import db, init
+    from app.domain import settle_due, today
+    st = Settings(db_path=str(tmp_path / "t.db"), cookie_secure=True)
+    init(st)
+    tod = today(st.zone)
+    w0 = _mk(st.db_path, tod)
+    with sqlite3.connect(st.db_path) as con:
+        total0 = con.execute("SELECT SUM(balance) FROM users").fetchone()[0]
+    with TestClient(create_app(st)):  # starting the app starts the real sweeper, which must settle both finished weeks
+        for _ in range(100):
+            with sqlite3.connect(st.db_path) as con:
+                if con.execute("SELECT COUNT(*) FROM settlements").fetchone()[0] >= 2:
+                    break
+            time.sleep(0.05)
+        else:
+            pytest.fail("the sweeper did not settle the finished weeks")
+    with db(st.db_path, write=True) as con:
+        assert settle_due(con, tod) == []  # a rerun settles nothing: idempotent
+    with sqlite3.connect(st.db_path) as con:
+        rows = con.execute("SELECT week, pool, fee, charity FROM settlements WHERE week>=? ORDER BY week", ((w0 - timedelta(14)).isoformat(),)).fetchall()
+        assert [r[0] for r in rows] == [(w0 - timedelta(14)).isoformat(), (w0 - timedelta(7)).isoformat()]
+        bal = dict(con.execute("SELECT id, balance FROM users WHERE id IN (1,2,3)").fetchall())
+        total1 = con.execute("SELECT SUM(balance) FROM users").fetchone()[0]
+        ended = {r[0] for r in con.execute("SELECT id FROM pacts WHERE active=0")}
+    assert bal[2] == 1_000_000 - 2 * 100_000  # missed both days of W-1 only; no charge for W-2, before the pact existed
+    assert bal[3] == 1_000_000 - 50_000  # cancelled pact still paid its last week
+    assert 3 in ended  # and ended with it
+    assert bal[1] == 1_000_000 + 44_000 - 100_000  # W-2: won pool 50,000 - fee 6,000 (cap not reached); W-1: missed its one day
+    assert total0 - total1 == sum(r[2] + r[3] for r in rows)  # money conserved: only fee + charity leave the system
+    with sqlite3.connect(st.db_path) as con:
+        assert con.execute("SELECT SUM(amount) FROM txns WHERE kind='reward'").fetchone()[0] == 44_000  # and the payout is in the ledger
+
+
+def test_a_suspicious_clock_holds_settlement_until_an_operator_releases_it(tmp_path):
+    import time
+
+    from app.db import init
+    from app.domain import today
+    from app.main import sweep
+    st = Settings(db_path=str(tmp_path / "t.db"), cookie_secure=True, admin_token="a" * 40)
+    init(st)
+    _mk(st.db_path, today(st.zone))
+
+    def settlements():
+        with sqlite3.connect(st.db_path) as con:
+            return con.execute("SELECT COUNT(*) FROM settlements").fetchone()[0]
+
+    sweep(st, jumped=True)  # the sweeper saw the wall clock and the monotonic clock disagree
+    assert settlements() == 0
+    with sqlite3.connect(st.db_path) as con:
+        assert con.execute("SELECT v FROM meta WHERE k='held'").fetchone()[0].startswith("clock")
+    sweep(st)  # still held on the next pass
+    assert settlements() == 0
+    with sqlite3.connect(st.db_path) as con:
+        con.execute("DELETE FROM meta WHERE k='last_sweep'")
+    with TestClient(create_app(st)) as c:  # booting the app starts another sweeper: it must respect the hold too
+        for _ in range(200):  # every sweep writes last_sweep, so wait for the sweeper to have actually run
+            with sqlite3.connect(st.db_path) as con:
+                if con.execute("SELECT 1 FROM meta WHERE k='last_sweep'").fetchone():
+                    break
+            time.sleep(0.05)
+        else:
+            pytest.fail("the sweeper never ran")
+        assert settlements() == 0
+        assert c.post("/api/admin/settle", headers={"authorization": "Bearer " + "a" * 40}).status_code == 200  # the operator decides
+    assert settlements() >= 2
+    with sqlite3.connect(st.db_path) as con:
+        assert con.execute("SELECT 1 FROM meta WHERE k='held'").fetchone() is None
+
+
+def test_create_pact_never_settles_while_the_hold_is_on(tmp_path):
+    from app.db import db, init
+    from app.domain import settle_due, today
+    st = Settings(db_path=str(tmp_path / "t.db"), cookie_secure=True)
+    init(st)
+    tod = today(st.zone)
+    _mk(st.db_path, tod)
+    with sqlite3.connect(st.db_path) as con:
+        con.execute("INSERT INTO meta VALUES('held','test')")
+    with db(st.db_path, write=True) as con:
+        assert settle_due(con, tod) == []  # the guard lives in the shared function, so create_pact and every other caller obey it
+
+
+def test_wall_clock_moving_backwards_also_holds(prod):
+    import time
+
+    from app.main import sweep
+    with sqlite3.connect(prod.st.db_path) as con:
+        con.execute("INSERT OR REPLACE INTO meta VALUES('last_sweep', ?)", (str(int(time.time()) + 7200),))
+    sweep(prod.st)
+    with sqlite3.connect(prod.st.db_path) as con:
+        assert "back" in con.execute("SELECT v FROM meta WHERE k='held'").fetchone()[0]
+
+
+def test_an_sms_outage_does_not_burn_the_login_budgets(tmp_path, monkeypatch):
+    st, c = build(tmp_path, sms_hourly_budget=3)
+    from app.routes import auth
+    ok: list = []
+
+    def flaky(st_, phone, code):
+        if not ok:
+            raise auth.HTTPException(503, "sms_unavailable")
+        return None
+    monkeypatch.setattr(auth, "send_sms", flaky)
+    with c:
+        for _ in range(8):  # eight failed sends from one phone: far past the 3-per-10-minutes and 3-per-hour budgets
+            assert c.post("/api/auth/otp", json={"phone": "09121234321"}).status_code == 503
+        ok.append(1)  # the provider recovers
+        assert c.post("/api/auth/otp", json={"phone": "09121234321"}).status_code == 200  # nobody is locked out by the outage
+
+
+def test_community_survives_a_settlement_that_pauses_users_inside_the_snapshot_window(demo):
+    login(demo)
+    assert demo.get("/api/community").status_code == 200  # snapshot cached with everyone's pacts
+    with sqlite3.connect(demo.st.db_path) as con:
+        con.execute("UPDATE pacts SET active=0")  # what a settlement does to users it pauses
+    r = demo.get("/api/community")
+    assert r.status_code == 200 and r.json()["leaderboard"]  # stale snapshot, but names come from the snapshot's own users
+
+
+def test_database_refuses_negative_money_whatever_the_app_does(demo):
+    with sqlite3.connect(demo.st.db_path) as con:
+        with pytest.raises(sqlite3.DatabaseError, match="negative"):
+            con.execute("UPDATE users SET balance=-1 WHERE id=1")
+        with pytest.raises(sqlite3.DatabaseError, match="negative"):
+            con.execute("UPDATE users SET points=-1 WHERE id=1")
+
+
+def test_the_demo_ledger_explains_every_balance(demo):
+    with sqlite3.connect(demo.st.db_path) as con:
+        bad = con.execute("SELECT COUNT(*) FROM users u WHERE u.balance != COALESCE((SELECT SUM(amount) FROM txns WHERE user_id=u.id),0)").fetchone()[0]
+    assert bad == 0
+
+
+def test_health_reports_how_far_settlement_has_got(demo):
+    assert "settled_through" in demo.get("/api/health").json()
+
+
+# ---- red/blue panel findings ----------------------------------------------------------------------------------------------
+def test_the_daily_otp_send_cap_survives_logins_and_the_sweeper(demo):
+    from app.main import sweep
+    p = "09127654321"
+    login(demo, p)  # a successful login used to delete the row that holds the daily counter
+    sweep(demo.st)  # so did the sweeper
+    with sqlite3.connect(demo.st.db_path) as con:
+        assert con.execute("SELECT sent FROM otps WHERE phone=?", (p,)).fetchone()[0] >= 1
+        con.execute("UPDATE otps SET sent=10 WHERE phone=?", (p,))
+    assert demo.post("/api/auth/otp", json={"phone": p}).status_code == 429  # 11th send in 24 h: refused
+
+
+def test_only_a_finished_daily_window_is_purged(demo):
+    import time
+
+    from app.main import sweep
+    with sqlite3.connect(demo.st.db_path) as con:
+        con.execute("INSERT INTO otps(phone,code_hash,expires,win_start,sent) VALUES('09120001111','x',1,?,5)", (int(time.time()) - 100,))
+        con.execute("INSERT INTO otps(phone,code_hash,expires,win_start,sent) VALUES('09120002222','x',1,?,5)", (int(time.time()) - 90_000,))
+    sweep(demo.st)
+    with sqlite3.connect(demo.st.db_path) as con:
+        left = {r[0] for r in con.execute("SELECT phone FROM otps")}
+    assert "09120001111" in left and "09120002222" not in left
+
+
+def test_ipv6_clients_are_keyed_by_subscriber_not_by_address():
+    from app.security import peer_ip
+    sc = lambda ip, xff=None: {"client": (ip, 1), "headers": [(b"x-forwarded-for", xff.encode())] if xff else []}  # noqa: E731
+    assert peer_ip(sc("2001:db8:1:2:aaaa::1"), 0) == peer_ip(sc("2001:db8:1:2:bbbb::9"), 0)  # same /64: one client
+    assert peer_ip(sc("2001:db8:1:3::1"), 0) != peer_ip(sc("2001:db8:1:2::1"), 0)
+    assert peer_ip(sc("::ffff:203.0.113.7"), 0) == "203.0.113.7"
+    assert peer_ip(sc("172.18.0.2", "9.9.9.9, 2001:db8:5:5:1::2"), 1) == peer_ip(sc("2001:db8:5:5:ffff::3"), 0)
+    assert peer_ip(sc("172.18.0.2", "not-an-ip"), 1) == "172.18.0.2"  # garbage never becomes a key
+
+
+def test_provider_rejections_still_cost_the_caller_but_outages_do_not(tmp_path, monkeypatch):
+    import urllib.error
+
+    from app.routes import auth
+    st, c = build(tmp_path, demo=False, cookie_secure=True, sms_webhook_url="https://sms.example/hook")
+    mode = {"v": "reject"}
+
+    def fake_open(req, timeout):
+        if mode["v"] == "reject":
+            raise urllib.error.HTTPError(req.full_url, 400, "bad number", {}, None)
+        raise TimeoutError("provider down")
+    monkeypatch.setattr(auth.urllib.request, "urlopen", fake_open)
+    monkeypatch.setitem(auth._sms, "fails", 0)
+    monkeypatch.setitem(auth._sms, "until", 0.0)
+    with c:
+        codes = [c.post("/api/auth/otp", json={"phone": f"0912555{i:04d}"}).status_code for i in range(12)]
+        assert codes[:10] == [400] * 10 and codes[10] == 429  # numbers the provider refuses burn the per-IP budget (10 per 10 min)
+        mode["v"] = "down"
+        assert c.post("/api/auth/otp", json={"phone": "09125559999"}).status_code == 429  # same IP is still capped even during an outage
+
+
+def test_sms_circuit_breaker_stops_hammering_a_dead_provider(tmp_path, monkeypatch):
+    from app.routes import auth
+    st, c = build(tmp_path, demo=False, cookie_secure=True, sms_webhook_url="https://sms.example/hook")
+    calls = []
+    monkeypatch.setattr(auth.urllib.request, "urlopen", lambda req, timeout: calls.append(1) or (_ for _ in ()).throw(TimeoutError()))
+    monkeypatch.setitem(auth._sms, "fails", 0)
+    monkeypatch.setitem(auth._sms, "until", 0.0)
+    with c:
+        for i in range(6):
+            assert c.post("/api/auth/otp", json={"phone": f"0912777{i:04d}"}).status_code == 503
+    assert len(calls) == 3  # after three straight failures the app stops calling the provider for a minute
+
+
+def test_rejected_requests_spend_the_rate_limit_budget_too(tmp_path):
+    st, c = build(tmp_path, rate_per_min=5)
+    with c:
+        c.app.state.limiter._clock = lambda: 1000.0
+        codes = [c.post("/api/wallet/topup", headers={"sec-fetch-site": "cross-site", "content-type": "application/json"}, json={}).status_code for _ in range(8)]
+    assert codes[:5] == [403] * 5 and codes[5:] == [429] * 3  # a stream of cheap 403s cannot be free
+
+
+def test_guard_rejections_are_logged_a_bounded_number_of_times(tmp_path, caplog, monkeypatch):
+    import logging
+
+    from app import obs
+    st, c = build(tmp_path)  # create_app() configures the logger, so adjust it afterwards
+    monkeypatch.setattr(obs.log, "propagate", True)  # our logger is isolated from the root handler; let pytest see it
+    with c, caplog.at_level(logging.WARNING, logger="fitpeyman"):
+        c.app.state.limiter._clock = lambda: 1000.0
+        for _ in range(50):
+            c.post("/api/wallet/topup" + "x" * 500, headers={"sec-fetch-site": "cross-site", "content-type": "application/json"}, json={})
+    logged = [r for r in caplog.records if r.getMessage() == "csrf_blocked"]
+    assert 1 <= len(logged) <= 5 and all(len(r.ctx["path"]) <= 200 for r in logged)
+
+
+def test_log_phone_references_are_keyed_not_a_bare_hash():
+    import hashlib
+
+    from app import obs
+    assert obs.ref("09120000001") == obs.ref("09120000001") != obs.ref("09120000002")
+    assert obs.ref("09120000001") != hashlib.sha256(b"09120000001").hexdigest()[:16]  # an unkeyed hash is reversible in minutes
+    assert len(obs.ref("x")) == 16
+
+
+def test_an_easy_step_goal_cannot_be_bought_through_the_api(demo):
+    new_user(demo)
+    assert demo.post("/api/pacts", json={"type": "steps", "target_days": 1, "stake": 20_000, "daily_goal": 1000}).status_code == 422
+    assert demo.post("/api/pacts", json={"type": "steps", "target_days": 1, "stake": 20_000, "daily_goal": 6000}).status_code == 200
+
+
+def test_sign_out_everywhere_revokes_every_device(tmp_path):
+    st, c1 = build(tmp_path)
+    with c1:
+        login(c1, "09126660001")
+        c2 = TestClient(c1.app, base_url="http://testserver")
+        login(c2, "09126660001")  # a second device
+        assert c1.get("/api/me").status_code == 200 and c2.get("/api/me").status_code == 200
+        assert c1.post("/api/auth/logout-all", json={}).status_code == 200
+        assert c2.get("/api/me").status_code == 401  # the stolen/lost phone is cut off too
+
+
+def test_account_deletion_erases_activity_pacts_and_otp_row(demo):
+    login(demo, "09125550007")
+    uid = demo.get("/api/me").json()["id"]
+    with sqlite3.connect(demo.st.db_path) as con:
+        con.execute("INSERT INTO pacts(id,user_id,type,target_days,stake,daily_goal,created,active,ends) VALUES(9001,?,'gym',1,10000,30,'2026-01-01',0,'2026-01-02')", (uid,))
+        con.execute("INSERT INTO checkins(pact_id,day,value) VALUES(9001,'2026-01-01',45)")
+    assert demo.request("DELETE", "/api/me", json={}).status_code == 200  # demo: a balance does not block deletion
+    with sqlite3.connect(demo.st.db_path) as con:
+        assert con.execute("SELECT COUNT(*) FROM checkins WHERE pact_id=9001").fetchone()[0] == 0
+        assert con.execute("SELECT COUNT(*) FROM pacts WHERE user_id=?", (uid,)).fetchone()[0] == 0
+        assert con.execute("SELECT COUNT(*) FROM otps WHERE phone='09125550007'").fetchone()[0] == 0
+        assert con.execute("SELECT phone FROM users WHERE id=?", (uid,)).fetchone()[0] is None
+
+
+@pytest.mark.parametrize("url,ok", [("https://sms.example/h", True), ("http://sms-gateway/h", True), ("http://10.0.0.5/h", True), ("http://127.0.0.1:9/h", True),
+                                    ("http://sms.example.com/h", False), ("http://8.8.8.8/h", False)])
+def test_plain_http_sms_webhooks_are_refused_unless_internal(monkeypatch, url, ok):
+    monkeypatch.setenv("SMS_WEBHOOK_URL", url)
+    if ok:
+        assert Settings.from_env().sms_webhook_url == url
+    else:
+        with pytest.raises(ValueError):
+            Settings.from_env()
+
+
+def test_log_key_must_be_long_enough(monkeypatch):
+    monkeypatch.setenv("LOG_KEY", "short")
+    with pytest.raises(ValueError):
+        Settings.from_env()
+
+
+def test_the_public_business_chart_is_served_from_the_shared_cache(demo):
+    a = demo.get("/api/business").json()
+    with sqlite3.connect(demo.st.db_path) as con:
+        con.execute("DELETE FROM checkins")  # a fresh query would now return zeros
+    assert demo.get("/api/business").json()["daily"] == a["daily"]
+
+
+def test_a_huge_pact_id_is_a_validation_error_not_a_500(demo):
+    new_user(demo)
+    for pid in (10**23, -1, 0):
+        assert demo.post(f"/api/pacts/{pid}/checkin", json={"value": 40}).status_code in (404, 422)
+        assert demo.request("DELETE", f"/api/pacts/{pid}", json={}).status_code in (404, 422)
+
+
+def test_a_no_money_pact_is_possible_with_an_empty_wallet_and_settles_without_dividing_by_zero(demo):
+    login(demo, "09125550123")  # brand-new user: balance 0, the only kind of user a production signup is before payments exist
+    r = demo.post("/api/pacts", json={"type": "gym", "target_days": 1, "stake": 0})
+    assert r.status_code == 200 and r.json()["goal"] == 30
+    assert demo.post("/api/pacts", json={"type": "steps", "target_days": 1, "stake": 5000}).status_code == 422  # real money: 10,000 minimum
+    pid = r.json()["id"]
+    assert demo.post(f"/api/pacts/{pid}/checkin", json={"value": 45}).json()["done_days"] == 1  # a winner whose weight is 0
+    assert demo.post("/api/settle", json={}).status_code == 200  # total_w == 0 must not raise ZeroDivisionError
+    assert_ledger(demo.st.db_path)
